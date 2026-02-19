@@ -71,8 +71,8 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-11-18",
     amount: "$47,892.37",
-    counterpartyCountry: "CY",
-    description: "Outbound wire to CY beneficiary with no prior transaction history; amount exceeds 90-day baseline by 240%. Stated purpose trade settlement; no supporting documentation on file.",
+    counterpartyCountry: "Cyprus",
+    description: "Outbound wire to Cyprus beneficiary with no prior transaction history; amount exceeds 90-day baseline by 240%. Stated purpose trade settlement; no supporting documentation on file.",
     riskLevel: "High",
   },
   {
@@ -83,7 +83,7 @@ const ALERTS: Alert[] = [
     type: "Cash Deposit",
     date: "2024-11-14",
     amount: "$9,847.20",
-    counterpartyCountry: "US",
+    counterpartyCountry: "United States",
     description: "Multiple cash deposits of $9,850 and similar just below CTR threshold over 48 hours; no matching business pattern. Seven deposits totaling $67,240 in 72-hour window.",
     riskLevel: "High",
   },
@@ -95,7 +95,7 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-10-29",
     amount: "$124,750.25",
-    counterpartyCountry: "AE",
+    counterpartyCountry: "United Arab Emirates",
     description: "Outbound wire to beneficiary linked to politically exposed person via World-Check match; no prior relationship or documented purpose. UAE counterparty; enhanced due diligence not completed.",
     riskLevel: "High",
   },
@@ -107,8 +107,8 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-12-02",
     amount: "$28,340.60",
-    counterpartyCountry: "RU",
-    description: "Counterparty name and address match to OFAC designated list; transaction placed on hold pending compliance review. RU jurisdiction; no prior screening hit for this account.",
+    counterpartyCountry: "Russia",
+    description: "Counterparty name and address match to OFAC designated list; transaction placed on hold pending compliance review. Russia jurisdiction; no prior screening hit for this account.",
     riskLevel: "High",
   },
   {
@@ -119,7 +119,7 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-12-05",
     amount: "$28,340.60",
-    counterpartyCountry: "SE",
+    counterpartyCountry: "Sweden",
     description: "Partial name/address match to OFAC SDN list entity; wire amount inconsistent with account profile. Swedish entity linked to sanctioned ultimate beneficiary.",
     riskLevel: "High",
   },
@@ -131,7 +131,7 @@ const ALERTS: Alert[] = [
     type: "ACH",
     date: "2024-11-22",
     amount: "$24,999.87",
-    counterpartyCountry: "US",
+    counterpartyCountry: "United States",
     description: "ACH volume 4.2x above 90-day baseline; multiple debits within 48 hours. No documented business event to support spike; possible layering or rapid movement.",
     riskLevel: "Medium",
   },
@@ -143,8 +143,8 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-11-08",
     amount: "$186,420.50",
-    counterpartyCountry: "CN",
-    description: "Invoice amount materially exceeds customs declaration for same shipment. Possible trade-based value movement; CN counterparty; escalation for document review.",
+    counterpartyCountry: "China",
+    description: "Invoice amount materially exceeds customs declaration for same shipment. Possible trade-based value movement; China counterparty; escalation for document review.",
     riskLevel: "Medium",
   },
   {
@@ -155,8 +155,8 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-10-15",
     amount: "$15,724.33",
-    counterpartyCountry: "VG",
-    description: "Wire beneficiary name does not match account holder on file. First-time payment to VG entity; no prior relationship or explanation for discrepancy.",
+    counterpartyCountry: "British Virgin Islands",
+    description: "Wire beneficiary name does not match account holder on file. First-time payment to British Virgin Islands entity; no prior relationship or explanation for discrepancy.",
     riskLevel: "Medium",
   },
   {
@@ -167,19 +167,19 @@ const ALERTS: Alert[] = [
     type: "Crypto Transfer",
     date: "2025-01-06",
     amount: "$3,124.50",
-    counterpartyCountry: "US",
+    counterpartyCountry: "United States",
     description: "Twelve small transfers to same exchange within 24 hours; amounts below $5k each. Possible structuring to avoid reporting; no declared crypto activity on account.",
     riskLevel: "Medium",
   },
   {
     id: "ALRT-2024-010",
-    title: "Single wire to high-risk jurisdiction (VG)",
+    title: "Single wire to high-risk jurisdiction (British Virgin Islands)",
     entityName: "Coastal Trading Inc",
     entityId: "CUST-40955",
     type: "Wire",
     date: "2024-09-30",
     amount: "$8,750.25",
-    counterpartyCountry: "VG",
+    counterpartyCountry: "British Virgin Islands",
     description: "First-time wire to British Virgin Islands; stated purpose trade settlement. Documentation received and reviewed; within expected pattern for declared business.",
     riskLevel: "Low",
   },
@@ -191,7 +191,7 @@ const ALERTS: Alert[] = [
     type: "ACH",
     date: "2024-11-28",
     amount: "$5,247.00",
-    counterpartyCountry: "US",
+    counterpartyCountry: "United States",
     description: "Three ACH credits in similar amounts over one week; within normal business pattern for known payroll vendor. No velocity or jurisdiction concerns.",
     riskLevel: "Low",
   },
@@ -203,7 +203,7 @@ const ALERTS: Alert[] = [
     type: "Cash Deposit",
     date: "2025-01-12",
     amount: "$7,183.50",
-    counterpartyCountry: "US",
+    counterpartyCountry: "United States",
     description: "Single deposit below CTR threshold; consistent with declared retail activity. No prior alerts; account in good standing.",
     riskLevel: "Low",
   },
@@ -215,7 +215,7 @@ const ALERTS: Alert[] = [
     type: "Wire",
     date: "2024-12-19",
     amount: "$12,480.90",
-    counterpartyCountry: "DE",
+    counterpartyCountry: "Germany",
     description: "First payment to new German supplier; documentation on file. Low-risk jurisdiction; KYC and due diligence completed at onboarding.",
     riskLevel: "Low",
   },
@@ -254,9 +254,9 @@ const FAKE_ANALYSIS: AnalysisResult = {
   ],
   evidence_traceability: {
     key_transactions: [
-      { date: "2025-02-14", amount: "$45,000", country: "CY", flag_reason: "High-risk jurisdiction" },
-      { date: "2025-02-12", amount: "$32,000", country: "VG", flag_reason: "Round-dollar; velocity" },
-      { date: "2025-02-10", amount: "$28,500", country: "CY", flag_reason: "Repeat counterparty" },
+      { date: "2025-02-14", amount: "$45,000", country: "Cyprus", flag_reason: "High-risk jurisdiction" },
+      { date: "2025-02-12", amount: "$32,000", country: "British Virgin Islands", flag_reason: "Round-dollar; velocity" },
+      { date: "2025-02-10", amount: "$28,500", country: "Cyprus", flag_reason: "Repeat counterparty" },
     ],
     customer_attributes: [
       { label: "PEP status", value: "No" },
@@ -328,8 +328,8 @@ const SAR_NARRATIVE_SECTIONS = [
 const SAR_METRICS = {
   totalSuspiciousAmount: "$105,500",
   transactionCount: 12,
-  topCounterparties: ["Counterparty A (CY)", "Counterparty B (VG)", "Counterparty C (CY)"],
-  jurisdictionBreakdown: "CY: 58% | VG: 42%",
+  topCounterparties: ["Counterparty A (Cyprus)", "Counterparty B (British Virgin Islands)", "Counterparty C (Cyprus)"],
+  jurisdictionBreakdown: "Cyprus: 58% | British Virgin Islands: 42%",
   velocityVsBaseline: "3.4x above 90-day baseline",
   clusteringSummary: "3 clusters in 14 days; avg $8,792/cluster",
 };
@@ -610,7 +610,7 @@ function TopRiskDrivers() {
                     : "View technical details"}
                 </button>
                 {expandedIndex === i && (
-                  <p className="mt-1.5 rounded border border-neutral-100 bg-neutral-50 px-2.5 py-2 font-mono text-[11px] text-neutral-600">
+                  <p className="mt-1.5 rounded border border-neutral-100 bg-neutral-50 px-2.5 py-2 font-mono text-xs text-neutral-600">
                     {driver.technicalDetails}
                   </p>
                 )}
@@ -643,7 +643,6 @@ export default function Home() {
   const [decisionLog, setDecisionLog] = useState<string[]>([]);
   const [decisionTaken, setDecisionTaken] = useState(false);
   const [alertStatuses, setAlertStatuses] = useState<Record<string, string>>({});
-  const [needsReviewCount, setNeedsReviewCount] = useState(5);
   const [severityFilter, setSeverityFilter] = useState<string>("All");
   const [statusFilter, setStatusFilter] = useState<string>("All");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -878,11 +877,6 @@ export default function Home() {
     const prevStatus = alertStatuses[alertId] ?? "Open";
     setAlertStatuses((prev) => ({ ...prev, [alertId]: newStatus }));
     const removesFromQueue = newStatus === "Escalated" || newStatus === "Dismissed";
-    if (prevStatus === "Open" && removesFromQueue) {
-      const alert = ALERTS.find((a) => a.id === alertId);
-      const isHighRisk = alert?.riskLevel?.toLowerCase() === "high";
-      if (isHighRisk) setNeedsReviewCount((c) => Math.max(0, c - 1));
-    }
   };
 
   const handleEscalate = () => {
@@ -904,18 +898,6 @@ export default function Home() {
     setDecisionLog((prev) => [
       ...prev,
       `Dismissed by ${CASE_HEADER.assignedAnalyst} – ${formatTimestamp()}`,
-    ]);
-    setDecisionTaken(true);
-    setToast({ show: true, message: `Status updated to ${newStatus}` });
-  };
-
-  const handleSendToAnalyst = () => {
-    const newStatus = "In Review";
-    if (selectedAlertId) applyAlertStatus(selectedAlertId, newStatus);
-    setCaseStatus("In Review");
-    setDecisionLog((prev) => [
-      ...prev,
-      `Sent to analyst by ${CASE_HEADER.assignedAnalyst} – ${formatTimestamp()}`,
     ]);
     setDecisionTaken(true);
     setToast({ show: true, message: `Status updated to ${newStatus}` });
@@ -962,9 +944,6 @@ export default function Home() {
             <p className="text-sm font-medium text-neutral-500">High risk alerts</p>
             <p className="mt-1 text-2xl font-semibold tracking-tight text-red-700">
               {highRisk}
-              {highRisk > 0 && (
-                <span className="text-base font-medium text-red-600"> ({needsReviewCount} Needs review)</span>
-              )}
             </p>
           </div>
           <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
@@ -1012,7 +991,7 @@ export default function Home() {
           {filtersOpen && (
             <div className="mt-3 space-y-3">
               <div className="flex flex-wrap gap-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400 w-full">Severity</span>
+                <span className="text-xs font-medium uppercase tracking-wider text-neutral-400 w-full">Severity</span>
                 {[
                   { value: "High", label: "HIGH", activeClass: "bg-red-600 text-white border-red-600" },
                   { value: "Medium", label: "MEDIUM", activeClass: "bg-orange-500 text-white border-orange-500" },
@@ -1032,12 +1011,11 @@ export default function Home() {
                 ))}
               </div>
               <div className="flex flex-wrap gap-1.5">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400 w-full">Status</span>
+                <span className="text-xs font-medium uppercase tracking-wider text-neutral-400 w-full">Status</span>
                 {[
                   { value: "Open", label: "Open", activeClass: "bg-neutral-500 text-white border-neutral-500" },
                   { value: "Dismissed", label: "Dismissed", activeClass: "bg-neutral-600 text-white border-neutral-600" },
                   { value: "Escalated", label: "Escalated", activeClass: "bg-emerald-600 text-white border-emerald-600" },
-                  { value: "In Review", label: "In Review", activeClass: "bg-blue-600 text-white border-blue-600" },
                   { value: "All", label: "All", activeClass: "bg-neutral-700 text-white border-neutral-700" },
                 ].map((opt) => (
                   <button
@@ -1061,10 +1039,7 @@ export default function Home() {
             const filteredAlerts = ALERTS.filter((alert) => {
               const matchSeverity = severityFilter === "All" || alert.riskLevel === severityFilter;
               const status = alertStatuses[alert.id] ?? "Open";
-              const matchStatus =
-                statusFilter === "All" ||
-                status === statusFilter ||
-                (statusFilter === "In Review" && status === "In Manual Review");
+              const matchStatus = statusFilter === "All" || status === statusFilter;
               return matchSeverity && matchStatus;
             });
             return filteredAlerts.map((alert) => {
@@ -1124,8 +1099,8 @@ export default function Home() {
                     <span>{alert.amount}</span>
                   </span>
                   <div className="mt-2 pt-2 border-t border-neutral-100">
-                    <span className="text-[10px] text-neutral-400 uppercase tracking-wider">Status</span>
-                    <span className={`ml-1.5 inline-flex rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusPillClass}`}>
+                    <span className="text-xs text-neutral-400 uppercase tracking-wider">Status</span>
+                    <span className={`ml-1.5 inline-flex rounded border px-1.5 py-0.5 text-xs font-medium ${statusPillClass}`}>
                       {alertStatus}
                     </span>
                   </div>
@@ -1141,105 +1116,58 @@ export default function Home() {
       <main className="flex min-h-0 flex-1 flex-col p-6">
         {selectedAlert ? (
           <div className="flex h-full flex-col gap-8">
-            {/* Alert + Case — single merged card */}
-            <div className="rounded-xl border border-neutral-200 bg-white p-6 shadow-sm">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <h3 className="text-lg font-bold text-neutral-900">{selectedAlert.title}</h3>
-                  <p className="text-sm text-neutral-600">{selectedAlert.entityName} ({selectedAlert.entityId})</p>
+            {/* Alert + Case — single merged card (compact, adequate font sizes) */}
+            <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+              <div className="flex justify-between items-start gap-3 mb-2">
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold leading-tight text-neutral-900">{selectedAlert.title}</h3>
+                  <p className="text-sm text-neutral-600 mt-0.5">{selectedAlert.entityName} ({selectedAlert.entityId})</p>
                 </div>
                 {(() => {
                   const risk = (analysis?.risk_recommendation ?? selectedAlert.riskLevel)?.toLowerCase() ?? "low";
                   return risk === "high" ? (
-                    <span className="rounded bg-red-600 px-3 py-1 text-xs font-bold text-white">HIGH</span>
+                    <span className="rounded bg-red-600 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">HIGH</span>
                   ) : risk === "medium" ? (
-                    <span className="rounded bg-orange-500 px-3 py-1 text-xs font-bold text-white">MEDIUM</span>
+                    <span className="rounded bg-orange-500 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">MEDIUM</span>
                   ) : (
-                    <span className="rounded bg-green-600 px-3 py-1 text-xs font-bold text-white">LOW</span>
+                    <span className="rounded bg-green-600 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">LOW</span>
                   );
                 })()}
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-x-4 gap-y-1 mb-2">
+                <div><span className="text-xs text-neutral-500 uppercase tracking-wider">Type</span><span className="block text-sm font-medium text-neutral-900">{selectedAlert.type}</span></div>
+                <div><span className="text-xs text-neutral-500 uppercase tracking-wider">Date</span><span className="block text-sm font-medium text-neutral-900">{selectedAlert.date}</span></div>
+                <div><span className="text-xs text-neutral-500 uppercase tracking-wider">Amount</span><span className="block text-sm font-medium text-neutral-900">{selectedAlert.amount}</span></div>
+                <div><span className="text-xs text-neutral-500 uppercase tracking-wider">Country</span><span className="block text-sm font-medium text-neutral-900">{selectedAlert.counterpartyCountry}</span></div>
                 <div>
-                  <div className="text-xs text-neutral-500">Type</div>
-                  <div className="text-sm font-medium text-neutral-900">{selectedAlert.type}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-neutral-500">Date</div>
-                  <div className="text-sm font-medium text-neutral-900">{selectedAlert.date}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-neutral-500">Amount</div>
-                  <div className="text-sm font-medium text-neutral-900">{selectedAlert.amount}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-neutral-500">Country</div>
-                  <div className="text-sm font-medium text-neutral-900">{selectedAlert.counterpartyCountry}</div>
+                  <span className="text-xs text-neutral-500 uppercase tracking-wider">Status</span>
+                  <div className="mt-0.5">
+                    {(() => {
+                      const s = alertStatuses[selectedAlert.id] ?? "Open";
+                      const pillClass =
+                        s === "Escalated" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : s === "In Review" || s === "In Manual Review" ? "bg-blue-50 text-blue-700 border-blue-200"
+                        : s === "Dismissed" || s === "Overridden" || s === "Closed" ? "bg-neutral-100 text-neutral-800 border-neutral-300"
+                        : "bg-neutral-50 text-neutral-500 border-neutral-200";
+                      return <span className={`inline-flex rounded border px-1.5 py-0.5 text-xs font-medium ${pillClass}`}>{s}</span>;
+                    })()}
+                  </div>
                 </div>
               </div>
 
-              <div className="mb-4">
-                <div className="text-xs text-neutral-500">Description</div>
-                <p className="text-sm text-neutral-800 mt-0.5">{selectedAlert.description}</p>
+              <div className="mb-2">
+                <p className="text-xs text-neutral-500 uppercase tracking-wider">Description</p>
+                <p className="text-sm text-neutral-800 leading-snug mt-0.5">{selectedAlert.description}</p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-4 pt-4 border-t border-neutral-200 text-sm">
-                <span className="flex items-center gap-1.5">
-                  <span className="text-neutral-500">Case ID</span>
-                  <span className="font-mono font-medium text-neutral-900">{CASE_HEADER.caseId}</span>
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-neutral-200 text-sm">
+                <span className="flex flex-wrap items-center gap-x-3 gap-y-0">
+                  <span><span className="text-neutral-500">Case ID</span> <span className="font-mono font-medium text-neutral-900">{CASE_HEADER.caseId}</span></span>
+                  <span><span className="text-neutral-500">Assigned</span> <span className="font-medium text-neutral-900">{CASE_HEADER.assignedAnalyst}</span></span>
+                  <span><span className="text-neutral-500">Created</span> <span className="text-neutral-900">{CASE_HEADER.createdDate}</span></span>
+                  <span><span className="text-neutral-500">SLA</span> <span className={`font-semibold tabular-nums ${/0d|^\d+h\s/i.test(CASE_HEADER.slaCountdown) ? "text-red-600" : "text-neutral-900"}`}>{CASE_HEADER.slaCountdown}</span></span>
                 </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="text-neutral-500">Status</span>
-                  {(() => {
-                    const s = alertStatuses[selectedAlert.id] ?? "Open";
-                    const pillClass =
-                      s === "Escalated"
-                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                        : s === "In Review" || s === "In Manual Review"
-                          ? "bg-blue-50 text-blue-700 border-blue-200"
-                          : s === "Dismissed" || s === "Overridden" || s === "Closed"
-                            ? "bg-neutral-100 text-neutral-800 border-neutral-300"
-                            : "bg-neutral-50 text-neutral-500 border-neutral-200";
-                    return (
-                      <span className={`inline-flex rounded border px-2 py-0.5 text-xs font-medium ${pillClass}`}>
-                        {s}
-                      </span>
-                    );
-                  })()}
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="text-neutral-500">Assigned</span>
-                  <span className="font-medium text-neutral-900">{CASE_HEADER.assignedAnalyst}</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="text-neutral-500">Created</span>
-                  <span className="text-neutral-900">{CASE_HEADER.createdDate}</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="text-neutral-500">SLA</span>
-                  <span
-                    className={`font-semibold tabular-nums ${
-                      /0d|^\d+h\s/i.test(CASE_HEADER.slaCountdown) ? "text-red-600" : "text-neutral-900"
-                    }`}
-                  >
-                    {CASE_HEADER.slaCountdown}
-                  </span>
-                </span>
-              </div>
-
-              {decisionLog.length > 0 && (
-                <div className="mt-4 pt-4 border-t border-neutral-200">
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">Decision log</p>
-                  <ul className="mt-1.5 space-y-1 text-xs text-neutral-600">
-                    {decisionLog.map((entry, i) => (
-                      <li key={i}>{entry}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <div className="mt-4 text-right">
                 <button
                   type="button"
                   onClick={runAnalysis}
@@ -1259,7 +1187,69 @@ export default function Home() {
                   )}
                 </button>
               </div>
+
+              {decisionLog.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-neutral-200">
+                  <p className="text-xs font-medium uppercase tracking-wider text-neutral-500">Decision log</p>
+                  <ul className="mt-1 space-y-0.5 text-sm text-neutral-600">
+                    {decisionLog.map((entry, i) => (
+                      <li key={i}>{entry}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
+
+            {/* AI Risk Intelligence — compact, below alert, above tabs */}
+            {analysis && (
+              <section
+                className={`rounded-xl border border-neutral-200 border-l-4 bg-white p-4 shadow-md ${
+                  analysis.risk_recommendation === "High"
+                    ? "border-l-red-500"
+                    : analysis.risk_recommendation === "Medium"
+                      ? "border-l-amber-500"
+                      : "border-l-emerald-500"
+                }`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">AI Risk Intelligence</h3>
+                    <p className="mt-1 text-sm font-semibold leading-snug text-neutral-900">{analysis.executive_ai_conclusion}</p>
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <RiskBadge level={analysis.risk_recommendation} />
+                  <span className="text-sm font-medium text-neutral-600">Confidence: {analysis.confidence_score}%</span>
+                  <div className="w-20 h-1.5 overflow-hidden rounded-full bg-neutral-100">
+                    <div className="h-full rounded-full bg-blue-600 transition-all duration-500" style={{ width: `${analysis.confidence_score}%` }} />
+                  </div>
+                </div>
+                <div className="mt-2 pt-2 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-xs font-medium uppercase tracking-wider text-neutral-500">Recommended</span>
+                    <p className="text-sm font-bold text-neutral-900 leading-tight">{analysis.recommended_action}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleEscalate}
+                      disabled={decisionTaken}
+                      className="rounded-lg bg-neutral-900 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Escalate
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDismiss}
+                      disabled={decisionTaken}
+                      className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </section>
+            )}
 
             {/* Tabs: Summary | SAR Filing — compact spacing */}
             <div className="mt-4 w-full border-b border-neutral-200">
@@ -1289,79 +1279,22 @@ export default function Home() {
             <div className="mt-3 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
               {activeTab === "Summary" && analysis && (
                 <>
-                {/* AI Risk Intelligence — elevated, accent border */}
-                <section
-                  className={`rounded-xl border border-neutral-200 border-l-4 bg-white p-6 shadow-md ${
-                    analysis.risk_recommendation === "High"
-                      ? "border-l-red-500"
-                      : analysis.risk_recommendation === "Medium"
-                        ? "border-l-amber-500"
-                        : "border-l-emerald-500"
-                  }`}
-                >
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    AI Risk Intelligence
-                  </h3>
-                  <p className="mt-4 text-lg font-semibold leading-snug text-neutral-900">
-                    {analysis.executive_ai_conclusion}
-                  </p>
-                  <div className="mt-5 flex flex-wrap items-center gap-4">
-                    <RiskBadge level={analysis.risk_recommendation} />
-                    <span className="text-sm font-medium text-neutral-600">
-                      Confidence: {analysis.confidence_score}%
-                    </span>
-                    <div className="w-28">
-                      <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-100">
-                        <div
-                          className="h-full rounded-full bg-blue-600 transition-all duration-500"
-                          style={{ width: `${analysis.confidence_score}%` }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-5 border-t border-neutral-200 pt-5">
-                    <p className="text-xs font-medium uppercase tracking-wider text-neutral-500">
-                      Recommended action
-                    </p>
-                    <p className="mt-1 text-base font-bold text-neutral-900">
-                      {analysis.recommended_action}
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={handleEscalate}
-                        disabled={decisionTaken}
-                        className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Escalate
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleDismiss}
-                        disabled={decisionTaken}
-                        className="rounded-lg border-2 border-neutral-300 bg-white px-4 py-2 text-sm font-semibold text-neutral-700 transition-colors hover:border-neutral-400 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Dismiss
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSendToAnalyst}
-                        disabled={decisionTaken}
-                        className="rounded-lg border-2 border-neutral-300 bg-white px-4 py-2 text-sm font-semibold text-neutral-700 transition-colors hover:border-neutral-400 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Send to Analyst
-                      </button>
-                    </div>
-                  </div>
-                </section>
-
-                {/* Case Summary */}
+                {/* Alert Summary — single-alert focus, dynamic from selectedAlert */}
                 <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Case Summary
+                    Alert Summary
                   </h3>
                   <p className="mt-2 text-sm leading-snug text-neutral-700">
-                    {analysis.case_overview}
+                    {selectedAlert
+                      ? (() => {
+                          const country = selectedAlert.counterpartyCountry || "high-risk jurisdiction";
+                          const amount = selectedAlert.amount || "the transaction amount";
+                          const rec = analysis?.recommended_action || "escalate to enhanced due diligence and consider SAR filing";
+                          const riskLabel = (selectedAlert.riskLevel?.toLowerCase() ?? "high") === "high" ? "high risk" : selectedAlert.riskLevel?.toLowerCase() === "medium" ? "medium risk" : "elevated";
+                          const txType = (selectedAlert.type ?? "Wire").toLowerCase();
+                          return `This alert was flagged as ${riskLabel} due to an outbound ${txType} to a high-risk jurisdiction (${country}) with no prior transaction history for this beneficiary. The amount (${amount}) exceeds the entity's typical pattern, and no supporting documentation exists for the stated trade settlement purpose. This is consistent with potential layering or placement activity. No positive watchlist matches were found. Recommended action: ${rec}.`;
+                        })()
+                      : analysis?.case_overview}
                   </p>
                 </section>
 
@@ -1686,7 +1619,7 @@ export default function Home() {
                       <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
                         Intelligent SAR Builder
                       </h3>
-                      <span className="rounded border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-[11px] text-neutral-500">
+                      <span className="rounded border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-xs text-neutral-500">
                         v1 · Last saved 2h ago
                       </span>
                     </div>
@@ -1695,32 +1628,32 @@ export default function Home() {
                   <div className="p-5 space-y-6">
                     {/* Auto-Aggregated Metrics */}
                     <div>
-                      <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500 mb-3">
+                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-3">
                         Auto-aggregated metrics
                       </h4>
                       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-[11px] text-neutral-500">Total suspicious amount</p>
+                          <p className="text-xs text-neutral-500">Total suspicious amount</p>
                           <p className="mt-0.5 font-semibold tabular-nums text-neutral-900">{SAR_METRICS.totalSuspiciousAmount}</p>
                         </div>
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-[11px] text-neutral-500">Transaction count</p>
+                          <p className="text-xs text-neutral-500">Transaction count</p>
                           <p className="mt-0.5 font-semibold tabular-nums text-neutral-900">{SAR_METRICS.transactionCount}</p>
                         </div>
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-[11px] text-neutral-500">Velocity vs baseline</p>
+                          <p className="text-xs text-neutral-500">Velocity vs baseline</p>
                           <p className="mt-0.5 text-sm font-medium text-neutral-800">{SAR_METRICS.velocityVsBaseline}</p>
                         </div>
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3 sm:col-span-2">
-                          <p className="text-[11px] text-neutral-500">Top counterparties</p>
+                          <p className="text-xs text-neutral-500">Top counterparties</p>
                           <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.topCounterparties.join("; ")}</p>
                         </div>
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-[11px] text-neutral-500">Jurisdiction breakdown</p>
+                          <p className="text-xs text-neutral-500">Jurisdiction breakdown</p>
                           <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.jurisdictionBreakdown}</p>
                         </div>
                         <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3 sm:col-span-3">
-                          <p className="text-[11px] text-neutral-500">Transaction clustering summary</p>
+                          <p className="text-xs text-neutral-500">Transaction clustering summary</p>
                           <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.clusteringSummary}</p>
                         </div>
                       </div>
@@ -1758,16 +1691,16 @@ export default function Home() {
                     {/* SAR Narrative Draft — single editable field, filing-ready */}
                     <div className={sarFinalized ? "opacity-90" : ""}>
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                        <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">
+                        <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
                           SAR Narrative Draft
                         </h4>
                         {sarFinalized && (
-                          <span className="rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-600">
+                          <span className="rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-xs font-medium text-neutral-600">
                             Locked
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] text-neutral-500 mb-3">
+                      <p className="text-xs text-neutral-500 mb-3">
                         {sarFinalized
                           ? "Immutable. Snapshot captured at filing. This draft is included in the SAR filing package."
                           : "Investigator-authored narrative. Add, edit, or expand. Real-time compliance checks below."}
@@ -1782,7 +1715,7 @@ export default function Home() {
                       />
                       {/* Real-time compliance guardrails */}
                       <div className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                        <h5 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500 mb-2">
+                        <h5 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
                           Compliance guardrails
                         </h5>
                         {(() => {
@@ -1816,13 +1749,13 @@ export default function Home() {
                         </button>
                         {viewNarrativeStructure && (
                           <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                            <p className="text-[11px] text-neutral-500 mb-3">Structured breakdown for audit traceability. Values shown are resolved from tokens.</p>
+                            <p className="text-xs text-neutral-500 mb-3">Structured breakdown for audit traceability. Values shown are resolved from tokens.</p>
                             <div className="space-y-3">
                               {SAR_NARRATIVE_SECTIONS.map((section, i) => {
                                 const resolved = section.content.replace(/\[(\w+)\]/g, (_, key) => SAR_TOKEN_VALUES[key] ?? `[${key}]`);
                                 return (
                                   <div key={i} className="rounded border border-neutral-100 bg-white p-3">
-                                    <p className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">{section.title}</p>
+                                    <p className="text-xs font-medium uppercase tracking-wider text-neutral-500">{section.title}</p>
                                     <p className="mt-1.5 text-sm leading-snug text-neutral-700">{resolved}</p>
                                   </div>
                                 );
@@ -1842,7 +1775,7 @@ export default function Home() {
                       const missingFiltered = SAR_QA.missingElements.filter((el) => !(el.toLowerCase().includes("occupation") && occupationFilled));
                       return (
                     <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                      <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500 mb-3">
+                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-3">
                         QA / Completeness
                       </h4>
                       <div className="flex flex-wrap items-center gap-4">
@@ -1876,7 +1809,7 @@ export default function Home() {
                       <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-600 mb-4">
                         Final action & case disposition
                       </h4>
-                      <p className="text-[11px] text-neutral-500 mb-4">
+                      <p className="text-xs text-neutral-500 mb-4">
                         Converts draft into auditable compliance action. All actions are logged.
                       </p>
                       <div className="flex flex-wrap gap-3">
@@ -1918,7 +1851,7 @@ export default function Home() {
 
                       {/* Decision Audit Log */}
                       <div className="mt-5 border-t border-neutral-200 pt-4">
-                        <h5 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500 mb-2">
+                        <h5 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
                           Decision audit log
                         </h5>
                         <ul className="space-y-2">
@@ -1939,13 +1872,13 @@ export default function Home() {
                     </div>
 
                     {/* Regulatory-Safe Language */}
-                    <p className="text-[11px] text-neutral-500">
+                    <p className="text-xs text-neutral-500">
                       Regulatory-safe language: accusatory phrasing replaced with compliant wording (e.g. “may warrant investigation,” “no determination of guilt”).
                     </p>
 
                     {/* One-Click Export */}
                     <div>
-                      <h4 className="text-[11px] font-medium uppercase tracking-wider text-neutral-500 mb-2">
+                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
                         Export
                       </h4>
                       <div className="flex flex-wrap gap-2">
@@ -1990,7 +1923,7 @@ export default function Home() {
                         {sarTechnicalDrawerOpen ? "▼ Hide" : "▶ Show"} technical detail & token list
                       </button>
                       {sarTechnicalDrawerOpen && (
-                        <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 font-mono text-[11px] text-neutral-600">
+                        <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 font-mono text-xs text-neutral-600">
                           <p className="font-sans text-xs font-medium text-neutral-500 mb-2">Injected tokens</p>
                           <p>ENTITY_NAME, ENTITY_ID, ACCOUNT_OPEN_DATE, DATE_RANGE, TX_COUNT, TOTAL_AMOUNT, PCT_VS_BASELINE</p>
                         </div>
