@@ -45,8 +45,6 @@ interface EvidenceTraceability {
   rule_triggers: string[];
 }
 
-type EvidenceTab = "transactions" | "customer_attributes" | "rule_triggers";
-
 interface AnalysisResult {
   case_overview: string;
   key_risk_signals: RiskSignal[];
@@ -72,7 +70,7 @@ const ALERTS: Alert[] = [
     date: "2024-11-18",
     amount: "$47,892.37",
     counterpartyCountry: "Cyprus",
-    description: "Outbound wire to Cyprus beneficiary with no prior transaction history; amount exceeds 90-day baseline by 240%. Stated purpose trade settlement; no supporting documentation on file.",
+    description: "Outbound wire materially exceeds historical baseline; see Baseline section for calculated deviation. Stated purpose trade settlement; no supporting documentation on file.",
     riskLevel: "High",
   },
   {
@@ -296,8 +294,8 @@ const SAR_NARRATIVE_SECTIONS = [
   {
     title: "Activity summary",
     content:
-      "Between [DATE_RANGE], subject conducted [TX_COUNT] outbound transactions totaling [TOTAL_AMOUNT]. Activity concentrated in 14-day window; [PCT_VS_BASELINE] above 90-day baseline.",
-    tokens: ["DATE_RANGE", "TX_COUNT", "TOTAL_AMOUNT", "PCT_VS_BASELINE"],
+      "Between [DATE_RANGE], subject conducted [TX_COUNT] outbound transactions totaling [TOTAL_AMOUNT]. Activity concentrated in 14-day window; for baseline deviation see Baseline & Beneficiary Verification section.",
+    tokens: ["DATE_RANGE", "TX_COUNT", "TOTAL_AMOUNT"],
   },
   {
     title: "Behavioral indicators",
@@ -334,6 +332,194 @@ const SAR_METRICS = {
   clusteringSummary: "3 clusters in 14 days; avg $8,792/cluster",
 };
 
+/** Business Behavior Alignment — expected (KYC) vs observed (72–90d). Match = false → ❌ */
+const BUSINESS_BEHAVIOR_ROWS: { dimension: string; expected: string; observed: string; match: boolean }[] = [
+  { dimension: "Cash deposit frequency", expected: "Rare / none (declared no cash)", observed: "Frequent (12 in 90d)", match: false },
+  { dimension: "Average deposit size", expected: "<$2k", observed: "$8,200", match: false },
+  { dimension: "Revenue spike vs declared revenue", expected: "Aligned with declared revenue", observed: "42% of declared revenue; no corresponding revenue increase", match: false },
+];
+
+const BUSINESS_BEHAVIOR_REVENUE = {
+  declaredMonthlyRevenue: 19500,
+  totalDepositedInWindow: 98400,
+  windowMonths: 3,
+};
+const REVENUE_EXPOSURE_AMBER_PCT = 25;
+const REVENUE_EXPOSURE_RED_PCT = 50;
+
+/** Customer Risk Drift & Alert History — customer-level risk evolution */
+const CUSTOMER_RISK_DRIFT = {
+  riskRatingAtOnboarding: "Medium",
+  currentInternalRiskRating: "High",
+  alertsLast90Days: 3,
+  alertsLast12Months: 7,
+  priorSarFilings: true,
+  priorSarCount: 1,
+  alertFrequencyTrend: "Escalating" as "Stable" | "Increasing" | "Escalating",
+};
+
+/** Baseline & Beneficiary Verification — mock 90-day baseline for comparison */
+const BASELINE_VERIFICATION = {
+  avgOutboundWire90d: 18200,
+  largestPriorWire90d: 28500,
+  firstTimeBeneficiary: true,
+  lastTransactionWithBeneficiary: null as string | null,
+};
+function parseAmount(amountStr: string): number {
+  const n = parseFloat(amountStr.replace(/[$,]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Baseline deviation %: ((current - baselineAvg) / baselineAvg) * 100, rounded. Used only in Baseline & Beneficiary Verification and Case Narrative Draft. */
+function getBaselineDeviationPct(currentAmount: number): number {
+  const avg = BASELINE_VERIFICATION.avgOutboundWire90d;
+  return avg > 0 ? Math.round(((currentAmount - avg) / avg) * 100) : 0;
+}
+
+/** Business Capacity & Corridor Context — commercial plausibility */
+const CORRIDOR_CONTEXT = {
+  declaredMonthlyRevenue: BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue,
+  avgMonthlyOutbound90d: 17200,
+  countriesLast12Months: ["United States", "Germany", "Sweden"] as string[],
+  firstTimeCountry: true,
+};
+
+/** Industry Peer Benchmark Comparison — NAICS peer context */
+const INDUSTRY_PEER_BENCHMARK = {
+  avgOutboundPctOfRevenueSimilarNAICS: 42,
+  avgInternationalWireFreqPeerCohort: "8.2 per month",
+  peerPercentileOutboundActivity: 92,
+  peerPercentileCorridorUsage: 88,
+  industryDeviationSeverity: "High" as "Low" | "Moderate" | "High",
+};
+
+/** Historical Outbound Trend — last 6 months */
+const HISTORICAL_OUTBOUND_MONTHS: { month: string; total: number; largestSingle: number }[] = [
+  { month: "Oct 2024", total: 14200, largestSingle: 8200 },
+  { month: "Nov 2024", total: 18600, largestSingle: 12100 },
+  { month: "Dec 2024", total: 22400, largestSingle: 15800 },
+  { month: "Jan 2025", total: 19500, largestSingle: 14200 },
+  { month: "Feb 2025", total: 28100, largestSingle: 22100 },
+  { month: "Mar 2025", total: 38900, largestSingle: 32100 },
+];
+const HISTORICAL_TREND_INDICATOR: "Stable" | "Increasing" | "Volatile" = "Increasing";
+
+/** Behavioral Risk Composite — investigation-derived severity */
+const BEHAVIORAL_RISK_COMPOSITE = {
+  baselineDeviationSeverity: "High" as "Low" | "Moderate" | "High",
+  velocitySeverity: "High" as "Low" | "Moderate" | "High",
+  corridorNoveltySeverity: "Moderate" as "Low" | "Moderate" | "High",
+  revenueStrainSeverity: "High" as "Low" | "Moderate" | "High",
+  behavioralConsistencyScore: 28,
+};
+
+/** Anomaly severity from behavioral consistency score: &lt;40 = High, 40–70 = Moderate, &gt;70 = Low. Lower score = greater deviation. */
+function getBehavioralAnomalySeverity(score: number): "Low" | "Moderate" | "High" {
+  if (score < 40) return "High";
+  if (score <= 70) return "Moderate";
+  return "Low";
+}
+
+/** Source of Funds & Movement Timing — inbound/outbound and timing */
+const SOURCE_OF_FUNDS = {
+  largestInboundWithin7Days: 48500,
+  dateOfInbound: "2024-11-15",
+  dateOfOutbound: "2024-11-18",
+  timeGapHours: 68,
+  accountBalanceBeforeInbound: 12400,
+  accountBalanceAfterOutbound: 8300,
+};
+
+/** Inbound Counterparty & Source Legitimacy — origin of largest inbound */
+const INBOUND_COUNTERPARTY = {
+  counterpartyName: "Nordic Trade Finance AB",
+  counterpartyIndustry: "Wholesale trade" as string | null,
+  counterpartyJurisdiction: "Sweden",
+  firstTimeSender: true,
+  priorTransactionCountWithSender: 0,
+  senderInternalRiskRating: "Medium" as string | null,
+  sanctionsScreeningResult: "Clear" as "Clear" | "Match",
+  adverseMediaIndicator: false,
+  networkOverlap: 2,
+  sourceLegitimacyRisk: "Elevated" as "Low" | "Moderate" | "Elevated",
+};
+
+/** Short-Term Velocity Analysis — 7-day and 30-day burst detection */
+const SHORT_TERM_VELOCITY = {
+  totalOutboundLast7Days: 61200,
+  historical7DayAvgOutbound: 18000,
+  totalOutboundLast30Days: 98400,
+  historical30DayAvg: 72000,
+  spikeSeverity: "High" as "Low" | "Moderate" | "High",
+};
+
+/** Beneficiary Risk & Relationship Assessment */
+const BENEFICIARY_RISK = {
+  incorporationDate: "2018-03-12" as string | null,
+  industryClassification: "Wholesale trade / Import-export" as string | null,
+  jurisdictionRiskTier: "Elevated (FATF monitored)" as string,
+  firstTimeBeneficiary: true as boolean,
+  priorTransactionCount: 0 as number,
+  sanctionsScreeningResult: "Clear" as "Clear" | "Match",
+};
+
+/** Network Exposure & Counterparty Linkage — institutional pattern visibility */
+const NETWORK_EXPOSURE = {
+  otherCustomersWithThisBeneficiary90d: 4,
+  thoseAlertsEscalatedOrSarFiled: 2,
+  clusterRiskIndicator: "Elevated" as "Low" | "Moderate" | "Elevated",
+  corridorConcentrationScore: "12% of high-risk alerts in last 90 days",
+};
+
+/** Exposure Aggregation Summary — concentration risk */
+const EXPOSURE_AGGREGATION = {
+  totalLifetimeExposureBeneficiary: 47892,
+  total90DayExposureBeneficiary: 47892,
+  totalLifetimeExposureCountry: 124500,
+  total90DayExposureCountry: 98400,
+  pctOutboundVolumeToJurisdiction90d: 58,
+  countryConcentrationRisk: "High" as "Low" | "Moderate" | "High",
+  beneficiaryExposureConcentration: "High" as "Low" | "Moderate" | "High",
+};
+
+/** Stated Purpose & Documentation Review */
+const STATED_PURPOSE_DOCS = {
+  paymentReferenceText: "Invoice #INV-2024-8821 – Trade settlement" as string,
+  documentationAttached: false as boolean,
+  priorTradeWiresTotal: 14 as number,
+  priorTradeWiresWithDocumentationCount: 12 as number,
+  averageDocumentedTradeWireAmount: 11200 as number | null,
+};
+
+/** Mitigating Factors Assessment — balancing escalation decisions */
+const MITIGATING_FACTORS = {
+  accountTenureMonths: 18,
+  dateOfLastEDD: "2024-06-15" as string | null,
+  beneficialOwnershipVerified: true,
+  kycReviewStatus: "Current" as "Current" | "Expired",
+  historicalAlertResolutionPattern: "3 of 5 prior alerts closed as false positives",
+  relationshipStabilityIndicator: "Stable" as "Stable" | "Volatile",
+  mitigationStrength: "Moderate" as "Weak" | "Moderate" | "Strong",
+};
+
+/** Policy Escalation Mapping — internal triggers checklist. Rapid movement derived from time_gap_hours. */
+function getPolicyEscalationTriggers(timeGapHours: number): { label: string; met: boolean }[] {
+  const rapidMovement = ((): { label: string; met: boolean } => {
+    if (timeGapHours <= 24) return { label: `Strong rapid movement (${timeGapHours}h)`, met: true };
+    if (timeGapHours <= 72) return { label: `Moderate rapid movement (${timeGapHours}h)`, met: true };
+    return { label: `Rapid movement of funds (${timeGapHours}h) – not triggered`, met: false };
+  })();
+  return [
+    { label: ">200% deviation from baseline", met: false },
+    { label: "First-time beneficiary", met: true },
+    { label: "Elevated-risk jurisdiction", met: true },
+    rapidMovement,
+    { label: "Documentation gap", met: true },
+    { label: "Corridor novelty", met: true },
+  ];
+}
+const POLICY_ESCALATION_THRESHOLD = 3;
+
 const SAR_QA = {
   missingElements: ["Subject occupation if individual"],
   weakJustification: 0,
@@ -355,11 +541,12 @@ const SAR_TOKEN_VALUES: Record<string, string> = {
   DATE_RANGE: "2025-01-01 to 2025-02-14",
   TX_COUNT: "12",
   TOTAL_AMOUNT: "$105,500",
-  PCT_VS_BASELINE: "240%",
+  PCT_VS_BASELINE: "—",
 };
 
-function getMergedSarNarrative(occupation?: string, boStatus?: string): string {
-  const base = SAR_NARRATIVE_SECTIONS.map((s) => s.content).join("\n\n").replace(/\[(\w+)\]/g, (_, key) => SAR_TOKEN_VALUES[key] ?? `[${key}]`);
+function getMergedSarNarrative(occupation?: string, boStatus?: string, tokenOverrides?: Record<string, string>): string {
+  const tokens = { ...SAR_TOKEN_VALUES, ...tokenOverrides };
+  const base = SAR_NARRATIVE_SECTIONS.map((s) => s.content).join("\n\n").replace(/\[(\w+)\]/g, (_, key) => tokens[key] ?? `[${key}]`);
   const appendix: string[] = [];
   if (occupation?.trim()) appendix.push(`Subject's stated occupation as ${occupation.trim()} was reviewed; no inconsistencies with activity.`);
   if (boStatus === "Verified") appendix.push("Beneficial ownership verified, no red flags.");
@@ -387,9 +574,30 @@ type CaseStatus =
   | "Open"
   | "In Review"
   | "Escalated"
+  | "Under Investigation"
   | "Closed"
   | "Filed"
   | "Override – Manual Review";
+
+/** Locked escalation record after Confirm Escalation; rationale cannot be edited. */
+interface EscalationRecord {
+  rationale: string;
+  userId: string;
+  timestamp: string;
+  triggersMet: number;
+  triggersTotal: number;
+  threshold: number;
+  deviationPct: number;
+  timeGapHours: number;
+  triggerSnapshot: { label: string; met: boolean }[];
+}
+
+interface CaseStatusTransition {
+  from: CaseStatus;
+  to: CaseStatus;
+  timestamp: string;
+  userId: string;
+}
 
 const CASE_HEADER = {
   caseId: "CR-2025-0842",
@@ -466,6 +674,7 @@ const CASE_STATUS_STYLES: Record<CaseStatus, string> = {
   Open: "bg-emerald-50 text-emerald-700 border-emerald-200",
   "In Review": "bg-amber-50 text-amber-700 border-amber-200",
   Escalated: "bg-red-50 text-red-700 border-red-200",
+  "Under Investigation": "bg-red-50 text-red-700 border-red-200",
   Closed: "bg-emerald-50 text-emerald-700 border-emerald-200",
   Filed: "bg-neutral-100 text-neutral-700 border-neutral-300",
   "Override – Manual Review": "bg-neutral-100 text-neutral-700 border-neutral-300",
@@ -571,14 +780,63 @@ const TOP_RISK_DRIVERS_DATA: TopRiskDriverItem[] = [
   },
 ];
 
+const HIGH_RISK_THRESHOLD = 50;
+
+function BehavioralConsistencyTooltip() {
+  return (
+    <span className="group relative ml-1 inline-flex align-middle" title="Lower scores indicate greater deviation from historical behavior.">
+      <span
+        tabIndex={0}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-neutral-300 text-neutral-600 hover:bg-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-500 focus:ring-offset-1"
+        aria-label="Score scale and meaning"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
+          <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm8.706-1.442c1.146-.573 2.437.463 2.126 1.706l-.709 2.836.042-.02a.75.75 0 011.063 1.06l-.04.041c-.461.46-.544 1.174-.006 1.615a8.5 8.5 0 001.45 1.054.75.75 0 01-.982 1.15 10 10 0 01-1.687-1.265.75.75 0 01-.464-.563l-.002-.008v-.003l-.012-.01a.75.75 0 01.372-.564zm1.544-2.558a.75.75 0 01.75.75v.003a.75.75 0 01-.75.75h-.003a.75.75 0 01-.75-.75V9.25a.75.75 0 01.75-.75h.003z" clipRule="evenodd" />
+        </svg>
+      </span>
+      <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-64 -translate-x-1/2 rounded-lg border border-neutral-200 bg-neutral-900 px-3 py-2 text-xs font-normal text-white shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100" role="tooltip">
+        Lower scores indicate greater deviation from historical behavior. Scale: 0 = highly inconsistent, 100 = fully consistent.
+        <span className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-neutral-900" />
+      </span>
+    </span>
+  );
+}
+
+function RiskScoreTooltip({ score }: { score: number }) {
+  return (
+    <span className="group relative ml-1 inline-flex align-middle">
+      <span
+        tabIndex={0}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-neutral-300 text-neutral-600 hover:bg-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-500 focus:ring-offset-1"
+        aria-label="Scores and risk thresholds"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
+          <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm8.706-1.442c1.146-.573 2.437.463 2.126 1.706l-.709 2.836.042-.02a.75.75 0 011.063 1.06l-.04.041c-.461.46-.544 1.174-.006 1.615a8.5 8.5 0 001.45 1.054.75.75 0 01-.982 1.15 10 10 0 01-1.687-1.265.75.75 0 01-.464-.563l-.002-.008v-.003l-.012-.01a.75.75 0 01.372-.564zm1.544-2.558a.75.75 0 01.75.75v.003a.75.75 0 01-.75.75h-.003a.75.75 0 01-.75-.75V9.25a.75.75 0 01.75-.75h.003z" clipRule="evenodd" />
+        </svg>
+      </span>
+      <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-56 -translate-x-1/2 rounded-lg border border-neutral-200 bg-neutral-900 px-3 py-2 text-xs font-normal text-white shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100" role="tooltip">
+        <strong>Risk score:</strong> {score} (sum of top 5 drivers)
+        <br />
+        <strong>Thresholds:</strong> High 50+ · Medium 25–49 · Low &lt;25
+        <span className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-neutral-900" />
+      </span>
+    </span>
+  );
+}
+
 function TopRiskDrivers() {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+  const totalPointsFromShown = TOP_RISK_DRIVERS_DATA.reduce((sum, d) => sum + d.contribution, 0);
 
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
         Top Risk Drivers (5 of 18 model factors shown)
       </h3>
+      <p className="mt-2 text-sm font-semibold text-neutral-800 flex items-center gap-0">
+        Total points from shown drivers: {totalPointsFromShown}
+        <RiskScoreTooltip score={totalPointsFromShown} />
+      </p>
       <div className="mt-4 space-y-3">
         {TOP_RISK_DRIVERS_DATA.map((driver, i) => (
           <div
@@ -619,10 +877,6 @@ function TopRiskDrivers() {
           </div>
         ))}
       </div>
-      <p className="mt-4 text-xs text-neutral-500">
-        The model evaluates 18 behavioral and contextual risk factors. Top
-        contributors shown.
-      </p>
     </section>
   );
 }
@@ -632,10 +886,10 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analyzedResults, setAnalyzedResults] = useState<Record<string, AnalysisResult>>({});
-  const [evidenceTab, setEvidenceTab] = useState<EvidenceTab>("transactions");
-  const [activeTab, setActiveTab] = useState<"Summary" | "SAR Filing">("Summary");
+  const [activeTab, setActiveTab] = useState<"Summary" | "Initial Escalation Record" | "Other">("Summary");
   const [sarTechnicalDrawerOpen, setSarTechnicalDrawerOpen] = useState(false);
   const [sarNarrativeDraft, setSarNarrativeDraft] = useState("");
+  const [caseNarrativeDraft, setCaseNarrativeDraft] = useState("");
   const [occupation, setOccupation] = useState("");
   const [boStatus, setBoStatus] = useState<string>("Not Applicable");
   const [viewNarrativeStructure, setViewNarrativeStructure] = useState(false);
@@ -643,7 +897,7 @@ export default function Home() {
   const [decisionLog, setDecisionLog] = useState<string[]>([]);
   const [decisionTaken, setDecisionTaken] = useState(false);
   const [alertStatuses, setAlertStatuses] = useState<Record<string, string>>({});
-  const [severityFilter, setSeverityFilter] = useState<string>("All");
+  const [recommendationFilter, setRecommendationFilter] = useState<string>("All");
   const [statusFilter, setStatusFilter] = useState<string>("All");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [toast, setToast] = useState<{ show: boolean; message: string }>({
@@ -668,6 +922,10 @@ export default function Home() {
   const [decisionAuditLog, setDecisionAuditLog] = useState<
     { user: string; timestamp: string; action: string; delta?: string }[]
   >([]);
+  const [escalationModalOpen, setEscalationModalOpen] = useState(false);
+  const [escalationRationaleDraft, setEscalationRationaleDraft] = useState("");
+  const [escalationRecord, setEscalationRecord] = useState<EscalationRecord | null>(null);
+  const [caseStatusTransitionHistory, setCaseStatusTransitionHistory] = useState<CaseStatusTransition[]>([]);
 
   const selectedAlert = ALERTS.find((a) => a.id === selectedAlertId);
 
@@ -696,10 +954,30 @@ export default function Home() {
     if (selectedAlertId && analyzedResults[selectedAlertId]) setAnalysis(analyzedResults[selectedAlertId]);
   }, [selectedAlertId, analyzedResults]);
 
+  /* Regenerate Case Narrative Draft when selected alert changes */
+  useEffect(() => {
+    if (!selectedAlert) return;
+    const current = parseAmount(selectedAlert.amount);
+    const avg90 = BASELINE_VERIFICATION.avgOutboundWire90d;
+    const maxPrior = BASELINE_VERIFICATION.largestPriorWire90d;
+    const pctVsAvg = getBaselineDeviationPct(current);
+    const pctVsMax = maxPrior > 0 ? Math.round(((current - maxPrior) / maxPrior) * 100) : 0;
+    const policyTriggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+    const triggersMet = policyTriggers.filter((t) => t.met).length;
+    const thresholdMet = triggersMet >= POLICY_ESCALATION_THRESHOLD;
+    const narrative = [
+      `Transaction summary: On ${selectedAlert.date}, an outbound ${selectedAlert.type} of ${selectedAlert.amount} was sent to ${selectedAlert.counterpartyCountry}.`,
+      `Baseline comparison: The transaction represents a ${pctVsAvg > 0 ? "+" : ""}${pctVsAvg}% deviation from the 90-day average outbound ($${avg90.toLocaleString()}).`,
+      `Largest prior transaction: Compared to the largest prior single outbound in 90 days ($${maxPrior.toLocaleString()}), this is ${pctVsMax > 0 ? "+" : ""}${pctVsMax}% higher.`,
+      `Source of funds timing: The largest inbound within 7 days prior was $${SOURCE_OF_FUNDS.largestInboundWithin7Days.toLocaleString()} (${SOURCE_OF_FUNDS.dateOfInbound}); funds were held approximately ${SOURCE_OF_FUNDS.timeGapHours} hours before the outbound (${SOURCE_OF_FUNDS.dateOfOutbound}).`,
+      `Beneficiary risk: ${BENEFICIARY_RISK.firstTimeBeneficiary ? "First-time beneficiary." : "Prior transaction history exists."} Jurisdiction risk tier: ${BENEFICIARY_RISK.jurisdictionRiskTier}. Sanctions screening: ${BENEFICIARY_RISK.sanctionsScreeningResult}.`,
+      `Documentation status: ${STATED_PURPOSE_DOCS.documentationAttached ? "Supporting documentation on file." : "No supporting documentation currently on file."} Payment reference: ${STATED_PURPOSE_DOCS.paymentReferenceText}.`,
+      `Policy triggers met: ${triggersMet} of ${policyTriggers.length}; threshold (${POLICY_ESCALATION_THRESHOLD}) ${thresholdMet ? "met." : "not met."}`,
+    ].join(" ");
+    setCaseNarrativeDraft(narrative);
+  }, [selectedAlertId, selectedAlert]);
+
   const totalAlerts = ALERTS.length;
-  const highRisk = ALERTS.filter((a) => a.riskLevel?.toLowerCase() === "high").length;
-  const mediumRisk = ALERTS.filter((a) => a.riskLevel?.toLowerCase() === "medium").length;
-  const lowRisk = ALERTS.filter((a) => a.riskLevel?.toLowerCase() === "low").length;
 
   /* Seed audit log and SAR draft when analysis is first available */
   useEffect(() => {
@@ -712,8 +990,8 @@ export default function Home() {
         { user: "AI", timestamp: ts, action: "AI version updated", delta: "Narrative sections generated" },
       ];
     });
-    setSarNarrativeDraft((prev) => (prev === "" ? getMergedSarNarrative() : prev));
-  }, [analysis]);
+    setSarNarrativeDraft((prev) => (prev === "" ? getMergedSarNarrative(occupation, boStatus) : prev));
+  }, [analysis, occupation, boStatus]);
 
   useEffect(() => {
     if (!toast.show) return;
@@ -879,16 +1157,86 @@ export default function Home() {
     const removesFromQueue = newStatus === "Escalated" || newStatus === "Dismissed";
   };
 
-  const handleEscalate = () => {
-    const newStatus = "Escalated";
-    if (selectedAlertId) applyAlertStatus(selectedAlertId, newStatus);
-    setCaseStatus("Escalated");
+  const getDefaultEscalationRationale = (): string => {
+    const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+    const met = triggers.filter((t) => t.met).length;
+    const total = triggers.length;
+    const threshold = POLICY_ESCALATION_THRESHOLD;
+    const deviationPct = selectedAlert
+      ? getBaselineDeviationPct(parseAmount(selectedAlert.amount))
+      : 0;
+    const timeGap = SOURCE_OF_FUNDS.timeGapHours;
+    const country = selectedAlert?.counterpartyCountry ?? "Cyprus";
+    const beneficiaryLabel = "Mediterranean Trade Partners";
+    return `Escalation Rationale:
+
+This alert meets internal AML escalation criteria.
+
+Triggers met: ${met} of ${total} (threshold: ${threshold}).
+
+Key escalation drivers:
+• First-time beneficiary (${beneficiaryLabel} – ${country}, FATF monitored).
+• Elevated-risk jurisdiction exposure.
+• ${deviationPct}% deviation from 90-day outbound baseline.
+• Rapid movement of funds (${timeGap} hours between inbound and outbound).
+• No supporting documentation for stated trade settlement.
+• Corridor novelty (no prior transactions to ${country}).
+
+The activity is inconsistent with the customer's historical behavior and declared business profile. Escalation to Investigation is required under internal AML policy.`;
+  };
+
+  const handleEscalateClick = () => {
+    setEscalationRationaleDraft(getDefaultEscalationRationale());
+    setEscalationModalOpen(true);
+  };
+
+  const handleEscalateConfirm = () => {
+    const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+    const met = triggers.filter((t) => t.met).length;
+    const total = triggers.length;
+    const threshold = POLICY_ESCALATION_THRESHOLD;
+    const deviationPct = selectedAlert
+      ? getBaselineDeviationPct(parseAmount(selectedAlert.amount))
+      : 0;
+    const timeGap = SOURCE_OF_FUNDS.timeGapHours;
+    const ts = formatTimestamp();
+    const userId = CASE_HEADER.assignedAnalyst;
+
+    const record: EscalationRecord = {
+      rationale: escalationRationaleDraft,
+      userId,
+      timestamp: ts,
+      triggersMet: met,
+      triggersTotal: total,
+      threshold,
+      deviationPct,
+      timeGapHours: timeGap,
+      triggerSnapshot: triggers.map((t) => ({ label: t.label, met: t.met })),
+    };
+    setEscalationRecord(record);
+    setCaseStatusTransitionHistory((prev) => [
+      ...prev,
+      { from: caseStatus, to: "Under Investigation", timestamp: ts, userId },
+    ]);
+    setCaseStatus("Under Investigation");
+    if (selectedAlertId) applyAlertStatus(selectedAlertId, "Escalated");
+    setDecisionAuditLog((prev) => [
+      ...prev,
+      {
+        user: userId,
+        timestamp: ts,
+        action: "Escalated",
+        delta: `${met}/${total} policy triggers met. Case moved to Investigation.`,
+      },
+    ]);
     setDecisionLog((prev) => [
       ...prev,
-      `Escalated by AI – Accepted by ${CASE_HEADER.assignedAnalyst} – ${formatTimestamp()}`,
+      `Escalated by ${userId} – ${ts} – Initial Escalation Record created.`,
     ]);
     setDecisionTaken(true);
-    setToast({ show: true, message: `Status updated to ${newStatus}` });
+    setEscalationModalOpen(false);
+    setEscalationRationaleDraft("");
+    setToast({ show: true, message: "Case escalated. Status: Under Investigation. Assigned to Investigation queue." });
   };
 
   const handleDismiss = () => {
@@ -923,42 +1271,45 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-3">
           <div
-            className="h-8 w-8 rounded-full bg-neutral-200 flex items-center justify-center text-neutral-500 text-sm font-medium"
-            aria-hidden
+            className="h-8 w-8 shrink-0 rounded-full bg-neutral-300 flex items-center justify-center text-neutral-600 text-xs font-medium"
+            title={CASE_HEADER.assignedAnalyst}
+            aria-label={`Logged in as ${CASE_HEADER.assignedAnalyst}`}
           >
-            ?
+            {CASE_HEADER.assignedAnalyst.split(/[\s.]+/).map((s) => s[0]).join("").slice(0, 2).toUpperCase() || "U"}
           </div>
         </div>
       </header>
 
       {/* KPI summary row */}
       <div className="shrink-0 border-b border-neutral-200 bg-neutral-100 px-8 py-4">
-        <div className="grid grid-cols-4 gap-4">
-          <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
-            <p className="text-sm font-medium text-neutral-500">Total alerts</p>
-            <p className="mt-1 text-2xl font-semibold tracking-tight text-neutral-900">
-              {totalAlerts}
-            </p>
-          </div>
-          <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
-            <p className="text-sm font-medium text-neutral-500">High risk alerts</p>
-            <p className="mt-1 text-2xl font-semibold tracking-tight text-red-700">
-              {highRisk}
-            </p>
-          </div>
-          <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
-            <p className="text-sm font-medium text-neutral-500">Medium risk alerts</p>
-            <p className="mt-1 text-2xl font-semibold tracking-tight text-amber-700">
-              {mediumRisk}
-            </p>
-          </div>
-          <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
-            <p className="text-sm font-medium text-neutral-500">Low risk alerts</p>
-            <p className="mt-1 text-2xl font-semibold tracking-tight text-emerald-700">
-              {lowRisk}
-            </p>
-          </div>
-        </div>
+        {(() => {
+          const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+          const escalationLikely = triggers.filter((t) => t.met).length >= POLICY_ESCALATION_THRESHOLD;
+          const escalationRecommendedCount = escalationLikely ? totalAlerts : 0;
+          const dismissalRecommendedCount = escalationLikely ? 0 : totalAlerts;
+          return (
+            <div className="grid grid-cols-3 gap-4">
+              <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
+                <p className="text-sm font-medium text-neutral-500">Total alerts</p>
+                <p className="mt-1 text-2xl font-semibold tracking-tight text-neutral-900">
+                  {totalAlerts}
+                </p>
+              </div>
+              <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
+                <p className="text-sm font-medium text-neutral-500">Escalation recommended</p>
+                <p className="mt-1 text-2xl font-semibold tracking-tight text-red-700">
+                  {escalationRecommendedCount}
+                </p>
+              </div>
+              <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow duration-200">
+                <p className="text-sm font-medium text-neutral-500">Dismissal recommended</p>
+                <p className="mt-1 text-2xl font-semibold tracking-tight text-neutral-700">
+                  {dismissalRecommendedCount}
+                </p>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Main content: two columns */}
@@ -983,27 +1334,26 @@ export default function Home() {
           </button>
           {!filtersOpen && (
             <p className="mt-1 text-xs text-neutral-500">
-              {severityFilter === "All" && statusFilter === "All"
-                ? "All severity · All status"
-                : `${severityFilter === "All" ? "All severity" : severityFilter} · ${statusFilter === "All" ? "All status" : statusFilter}`}
+              {recommendationFilter === "All" && statusFilter === "All"
+                ? "All recommendations · All status"
+                : `${recommendationFilter === "All" ? "All recommendations" : recommendationFilter} · ${statusFilter === "All" ? "All status" : statusFilter}`}
             </p>
           )}
           {filtersOpen && (
             <div className="mt-3 space-y-3">
               <div className="flex flex-wrap gap-1.5">
-                <span className="text-xs font-medium uppercase tracking-wider text-neutral-400 w-full">Severity</span>
+                <span className="text-xs font-medium uppercase tracking-wider text-neutral-400 w-full">Recommendation</span>
                 {[
-                  { value: "High", label: "HIGH", activeClass: "bg-red-600 text-white border-red-600" },
-                  { value: "Medium", label: "MEDIUM", activeClass: "bg-orange-500 text-white border-orange-500" },
-                  { value: "Low", label: "LOW", activeClass: "bg-green-600 text-white border-green-600" },
                   { value: "All", label: "All", activeClass: "bg-neutral-700 text-white border-neutral-700" },
+                  { value: "Escalate", label: "Escalate", activeClass: "bg-amber-600 text-white border-amber-600" },
+                  { value: "Dismiss", label: "Dismiss", activeClass: "bg-neutral-500 text-white border-neutral-500" },
                 ].map((opt) => (
                   <button
                     key={opt.value}
                     type="button"
-                    onClick={() => setSeverityFilter(opt.value)}
+                    onClick={() => setRecommendationFilter(opt.value)}
                     className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                      severityFilter === opt.value ? opt.activeClass : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50"
+                      recommendationFilter === opt.value ? opt.activeClass : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50"
                     }`}
                   >
                     {opt.label}
@@ -1036,15 +1386,21 @@ export default function Home() {
 
         <ul className="flex-1 overflow-y-auto p-3">
           {(() => {
+            const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+            const escalationLikely = triggers.filter((t) => t.met).length >= POLICY_ESCALATION_THRESHOLD;
             const filteredAlerts = ALERTS.filter((alert) => {
-              const matchSeverity = severityFilter === "All" || alert.riskLevel === severityFilter;
+              const matchRecommendation =
+                recommendationFilter === "All" ||
+                (recommendationFilter === "Escalate" && escalationLikely) ||
+                (recommendationFilter === "Dismiss" && !escalationLikely);
               const status = alertStatuses[alert.id] ?? "Open";
               const matchStatus = statusFilter === "All" || status === statusFilter;
-              return matchSeverity && matchStatus;
+              return matchRecommendation && matchStatus;
             });
+            const triggersMet = triggers.filter((t) => t.met).length;
+            const triggersTotal = triggers.length;
             return filteredAlerts.map((alert) => {
             const cardAnalysis = analyzedResults[alert.id];
-            const risk = (cardAnalysis?.risk_recommendation ?? alert.riskLevel)?.toLowerCase() ?? "low";
             const isSelected = selectedAlertId === alert.id;
             const alertStatus = alertStatuses[alert.id] ?? "Open";
             const statusPillClass =
@@ -1055,23 +1411,18 @@ export default function Home() {
                   : alertStatus === "Dismissed" || alertStatus === "Overridden" || alertStatus === "Closed"
                     ? "bg-neutral-100 text-neutral-800 border-neutral-300"
                     : "bg-neutral-50 text-neutral-500 border-neutral-200";
-            const riskBadge = cardAnalysis ? (
-              risk === "high" ? (
-                <span className="absolute top-2 right-2 rounded bg-red-600 px-2 py-1 text-xs font-bold text-white">HIGH</span>
-              ) : risk === "medium" ? (
-                <span className="absolute top-2 right-2 rounded bg-orange-500 px-2 py-1 text-xs font-bold text-white">MEDIUM</span>
-              ) : (
-                <span className="absolute top-2 right-2 rounded bg-green-600 px-2 py-1 text-xs font-bold text-white">LOW</span>
-              )
+            const aiAssessmentBadge = cardAnalysis ? (
+              <div className="absolute top-2 right-2 text-right">
+                <span className={`inline-block rounded px-2 py-1 text-xs font-semibold ${escalationLikely ? "bg-red-600 text-white" : "bg-neutral-500 text-white"}`}>
+                  {escalationLikely ? "ESCALATE" : "Dismiss"}
+                </span>
+                <span className="block mt-1 text-[10px] text-neutral-400">Triggers: {triggersMet} / {triggersTotal}</span>
+              </div>
             ) : (
-              <span className="absolute top-2 right-2 rounded bg-neutral-400 px-2 py-1 text-xs font-medium text-white">Analyzing…</span>
+              <div className="absolute top-2 right-2 text-right">
+                <span className="inline-block rounded bg-neutral-400 px-2 py-1 text-xs font-medium text-white">Analyzing…</span>
+              </div>
             );
-            const riskTint =
-              risk === "high"
-                ? "border-neutral-100 bg-red-50 hover:border-red-200 hover:bg-red-100"
-                : risk === "medium"
-                  ? "border-neutral-100 bg-amber-50 hover:border-amber-200 hover:bg-amber-100"
-                  : "border-neutral-100 bg-gray-50 hover:border-neutral-200 hover:bg-neutral-100";
             return (
               <li key={alert.id}>
                 <button
@@ -1080,12 +1431,12 @@ export default function Home() {
                     setSelectedAlertId(alert.id);
                     setAnalysis(cardAnalysis ?? null);
                   }}
-                  className={`relative mb-2 w-full rounded-lg border px-4 py-3 text-left transition-all duration-200 ${
-                    isSelected ? "border-blue-200 bg-blue-50/80 shadow-sm" : riskTint
+                  className={`relative mb-2 w-full rounded-lg border border-neutral-200 bg-white px-4 py-3 text-left transition-all duration-200 hover:border-neutral-300 hover:bg-neutral-50 ${
+                    isSelected ? "border-blue-200 bg-blue-50/80 shadow-sm" : ""
                   }`}
                 >
-                  {riskBadge}
-                  <span className="block pr-16 font-medium text-neutral-900">
+                  {aiAssessmentBadge}
+                  <span className="block pr-24 font-medium text-neutral-900">
                     {alert.title}
                   </span>
                   <span className="mt-1 block text-sm text-neutral-500">
@@ -1124,13 +1475,17 @@ export default function Home() {
                   <p className="text-sm text-neutral-600 mt-0.5">{selectedAlert.entityName} ({selectedAlert.entityId})</p>
                 </div>
                 {(() => {
-                  const risk = (analysis?.risk_recommendation ?? selectedAlert.riskLevel)?.toLowerCase() ?? "low";
-                  return risk === "high" ? (
-                    <span className="rounded bg-red-600 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">HIGH</span>
-                  ) : risk === "medium" ? (
-                    <span className="rounded bg-orange-500 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">MEDIUM</span>
-                  ) : (
-                    <span className="rounded bg-green-600 px-2.5 py-0.5 text-xs font-bold text-white shrink-0">LOW</span>
+                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+                  const triggersMet = triggers.filter((t) => t.met).length;
+                  const triggersTotal = triggers.length;
+                  const escalationLikely = triggersMet >= POLICY_ESCALATION_THRESHOLD;
+                  return (
+                    <div className="text-right shrink-0">
+                      <span className={`rounded px-2.5 py-0.5 text-xs font-bold text-white ${escalationLikely ? "bg-red-600" : "bg-neutral-500"}`}>
+                        {escalationLikely ? "ESCALATE" : "Dismiss"}
+                      </span>
+                      <span className="block mt-1 text-[10px] text-neutral-500">Triggers: {triggersMet} / {triggersTotal}</span>
+                    </div>
                   );
                 })()}
               </div>
@@ -1161,31 +1516,13 @@ export default function Home() {
                 <p className="text-sm text-neutral-800 leading-snug mt-0.5">{selectedAlert.description}</p>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-neutral-200 text-sm">
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-neutral-200 text-sm">
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-0">
                   <span><span className="text-neutral-500">Case ID</span> <span className="font-mono font-medium text-neutral-900">{CASE_HEADER.caseId}</span></span>
                   <span><span className="text-neutral-500">Assigned</span> <span className="font-medium text-neutral-900">{CASE_HEADER.assignedAnalyst}</span></span>
                   <span><span className="text-neutral-500">Created</span> <span className="text-neutral-900">{CASE_HEADER.createdDate}</span></span>
                   <span><span className="text-neutral-500">SLA</span> <span className={`font-semibold tabular-nums ${/0d|^\d+h\s/i.test(CASE_HEADER.slaCountdown) ? "text-red-600" : "text-neutral-900"}`}>{CASE_HEADER.slaCountdown}</span></span>
                 </span>
-                <button
-                  type="button"
-                  onClick={runAnalysis}
-                  disabled={isAnalyzing}
-                  className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isAnalyzing ? (
-                    <>
-                      <svg className="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden>
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                      </svg>
-                      Analyzing…
-                    </>
-                  ) : (
-                    "Re-analyze"
-                  )}
-                </button>
               </div>
 
               {decisionLog.length > 0 && (
@@ -1200,10 +1537,10 @@ export default function Home() {
               )}
             </div>
 
-            {/* AI Risk Intelligence — compact, below alert, above tabs */}
+            {/* AI Risk Intelligence — compact, below alert, above tabs; buttons, recommendation, UI + Policy Escalation Mapping */}
             {analysis && (
               <section
-                className={`rounded-xl border border-neutral-200 border-l-4 bg-white p-4 shadow-md ${
+                className={`rounded-xl border border-neutral-200 border-l-4 bg-white p-3 shadow-md ${
                   analysis.risk_recommendation === "High"
                     ? "border-l-red-500"
                     : analysis.risk_recommendation === "Medium"
@@ -1211,47 +1548,61 @@ export default function Home() {
                       : "border-l-emerald-500"
                 }`}
               >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">AI Risk Intelligence</h3>
-                    <p className="mt-1 text-sm font-semibold leading-snug text-neutral-900">{analysis.executive_ai_conclusion}</p>
-                  </div>
-                </div>
-                <div className="mt-2 flex flex-wrap items-center gap-3">
-                  <RiskBadge level={analysis.risk_recommendation} />
-                  <span className="text-sm font-medium text-neutral-600">Confidence: {analysis.confidence_score}%</span>
-                  <div className="w-20 h-1.5 overflow-hidden rounded-full bg-neutral-100">
-                    <div className="h-full rounded-full bg-blue-600 transition-all duration-500" style={{ width: `${analysis.confidence_score}%` }} />
-                  </div>
-                </div>
-                <div className="mt-2 pt-2 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <span className="text-xs font-medium uppercase tracking-wider text-neutral-500">Recommended</span>
-                    <p className="text-sm font-bold text-neutral-900 leading-tight">{analysis.recommended_action}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={handleEscalate}
-                      disabled={decisionTaken}
-                      className="rounded-lg bg-neutral-900 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Escalate
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDismiss}
-                      disabled={decisionTaken}
-                      className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
+                {/* ESCALATION STATUS — within card; buttons on same row */}
+                {(() => {
+                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours);
+                  const metCount = triggers.filter((t) => t.met).length;
+                  const thresholdMet = metCount >= POLICY_ESCALATION_THRESHOLD;
+                  return (
+                    <div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                            ESCALATION STATUS
+                          </h4>
+                          <p className="mt-0.5 text-xs text-neutral-500">Internal triggers checklist</p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleEscalateClick}
+                            disabled={decisionTaken}
+                            className="rounded-lg bg-neutral-900 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Escalate
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleDismiss}
+                            disabled={decisionTaken}
+                            className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <ul className="mt-2 space-y-1 text-sm">
+                        {triggers.map((t, i) => (
+                          <li key={i} className="flex items-center gap-2">
+                            {t.met ? <span className="text-red-600" aria-label="Met">✓</span> : <span className="text-neutral-300" aria-label="Not met">✗</span>}
+                            <span className={t.met ? "text-neutral-900" : "text-neutral-500"}>{t.label}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
+                        <span className="font-medium text-neutral-800">Triggers met: {metCount} of {triggers.length}</span>
+                        <span className="text-neutral-500">·</span>
+                        <span className="text-neutral-600">Policy escalation threshold: <span className="font-medium text-neutral-900 tabular-nums">{POLICY_ESCALATION_THRESHOLD}</span></span>
+                        <span className="text-neutral-500">·</span>
+                        <span className="text-neutral-600">Threshold met: <span className={`font-medium ${thresholdMet ? "text-red-600" : "text-neutral-700"}`}>{thresholdMet ? "Yes" : "No"}</span></span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </section>
             )}
 
-            {/* Tabs: Summary | SAR Filing — compact spacing */}
+            {/* Tabs: Summary | Initial Escalation Record | Other (SAR Filing + other sections) */}
             <div className="mt-4 w-full border-b border-neutral-200">
               <div className="flex px-4">
                 <button
@@ -1266,11 +1617,20 @@ export default function Home() {
                 <button
                   type="button"
                   className={`px-6 py-3 text-sm font-medium transition-colors ${
-                    activeTab === "SAR Filing" ? "border-b-2 border-blue-600 text-blue-600" : "text-neutral-600 hover:text-neutral-900"
+                    activeTab === "Initial Escalation Record" ? "border-b-2 border-blue-600 text-blue-600" : "text-neutral-600 hover:text-neutral-900"
                   }`}
-                  onClick={() => setActiveTab("SAR Filing")}
+                  onClick={() => setActiveTab("Initial Escalation Record")}
                 >
-                  SAR Filing
+                  Initial Escalation Record
+                </button>
+                <button
+                  type="button"
+                  className={`px-6 py-3 text-sm font-medium transition-colors ${
+                    activeTab === "Other" ? "border-b-2 border-blue-600 text-blue-600" : "text-neutral-600 hover:text-neutral-900"
+                  }`}
+                  onClick={() => setActiveTab("Other")}
+                >
+                  Other
                 </button>
               </div>
             </div>
@@ -1298,7 +1658,525 @@ export default function Home() {
                   </p>
                 </section>
 
-                <TopRiskDrivers />
+                {/* Subject & Recipient Profile — after Alert Summary */}
+                <section className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">Subject &amp; Recipient Profile</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Subject Profile</p>
+                      <ul className="text-sm text-neutral-800 space-y-1.5 list-none">
+                        <li><span className="text-neutral-500">Name / ID:</span> {selectedAlert.entityName} ({selectedAlert.entityId})</li>
+                        <li><span className="text-neutral-500">Type:</span> Corporate (Freight &amp; Logistics)</li>
+                        <li><span className="text-neutral-500">Business / Occupation:</span> Import/export trading</li>
+                        <li><span className="text-neutral-500">Account Age:</span> 18 months</li>
+                        <li><span className="text-neutral-500">Normal Activity:</span> Avg monthly outbound $15k–$20k, mostly wires/ACH</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Recipient Profile</p>
+                      <ul className="text-sm text-neutral-800 space-y-1.5 list-none">
+                        <li><span className="text-neutral-500">Name:</span> Mediterranean Trade Partners</li>
+                        <li><span className="text-neutral-500">Account:</span> CY9876543210 (Bank of Cyprus)</li>
+                        <li><span className="text-neutral-500">Country:</span> Cyprus (FATF High-Risk)</li>
+                        <li><span className="text-neutral-500">Relationship:</span> No prior transactions (first-time beneficiary)</li>
+                      </ul>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Customer Risk Drift & Alert History — below Subject & Recipient Profile, above Baseline & Beneficiary Verification */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Customer Risk Drift &amp; Alert History
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Risk rating at onboarding</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding}</dd></div>
+                    <div><dt className="text-neutral-500">Current internal risk rating</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.currentInternalRiskRating}</dd></div>
+                    <div><dt className="text-neutral-500">Number of alerts in last 90 days</dt><dd className="font-medium text-neutral-900 tabular-nums">{CUSTOMER_RISK_DRIFT.alertsLast90Days}</dd></div>
+                    <div><dt className="text-neutral-500">Number of alerts in last 12 months</dt><dd className="font-medium text-neutral-900 tabular-nums">{CUSTOMER_RISK_DRIFT.alertsLast12Months}</dd></div>
+                    <div><dt className="text-neutral-500">Prior SAR filings</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.priorSarFilings ? `Yes (${CUSTOMER_RISK_DRIFT.priorSarCount})` : "No"}</dd></div>
+                    <div><dt className="text-neutral-500">Alert frequency trend indicator</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.alertFrequencyTrend}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    This alert occurs within a pattern of {CUSTOMER_RISK_DRIFT.alertsLast90Days} alerts in the last 90 days.
+                  </p>
+                  <p className="mt-1 text-sm text-neutral-700">
+                    Customer risk posture appears {CUSTOMER_RISK_DRIFT.alertFrequencyTrend}.
+                  </p>
+                </section>
+
+                {/* Baseline & Beneficiary Verification — below Customer Risk Drift */}
+                {selectedAlert && (() => {
+                  const currentAmount = parseAmount(selectedAlert.amount);
+                  const avg90 = BASELINE_VERIFICATION.avgOutboundWire90d;
+                  const maxPrior = BASELINE_VERIFICATION.largestPriorWire90d;
+                  const pctVsAvg = getBaselineDeviationPct(currentAmount);
+                  const pctVsMax = maxPrior > 0 ? Math.round(((currentAmount - maxPrior) / maxPrior) * 100) : 0;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Baseline &amp; Beneficiary Verification
+                      </h3>
+                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                        <div><dt className="text-neutral-500">90-day average outbound wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">${avg90.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Largest prior single outbound wire (90 days)</dt><dd className="font-medium text-neutral-900 tabular-nums">${maxPrior.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Current wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
+                        <div><dt className="text-neutral-500">% increase vs 90-day average</dt><dd className="font-medium text-neutral-900 tabular-nums">{pctVsAvg > 0 ? "+" : ""}{pctVsAvg}%</dd></div>
+                        <div><dt className="text-neutral-500">% increase vs largest prior transaction</dt><dd className="font-medium text-neutral-900 tabular-nums">{pctVsMax > 0 ? "+" : ""}{pctVsMax}%</dd></div>
+                        <div><dt className="text-neutral-500">First-time beneficiary confirmation</dt><dd className="font-medium text-neutral-900">{BASELINE_VERIFICATION.firstTimeBeneficiary ? "Yes" : "No"}</dd></div>
+                        <div className="sm:col-span-2"><dt className="text-neutral-500">Date of last transaction with this beneficiary</dt><dd className="font-medium text-neutral-900">{BASELINE_VERIFICATION.lastTransactionWithBeneficiary ?? "—"}</dd></div>
+                      </dl>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        Current wire exceeds 90-day average by {pctVsAvg > 0 ? "+" : ""}{pctVsAvg}% and prior single-transaction maximum by {pctVsMax > 0 ? "+" : ""}{pctVsMax}%.
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Business Capacity & Corridor Context — below Subject & Recipient Profile. Revenue % from same-period comparisons only. */}
+                {selectedAlert && (() => {
+                  const declaredMonthlyRevenue = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue;
+                  const currentWireAmount = parseAmount(selectedAlert.amount);
+                  const outbound90d = BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow;
+                  const declared90dRevenue = declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
+                  const wirePctOfMonthlyRevenue = declaredMonthlyRevenue > 0 ? Math.round((currentWireAmount / declaredMonthlyRevenue) * 100) : 0;
+                  const outbound90dPctOfDeclared90d = declared90dRevenue > 0 ? Math.round((outbound90d / declared90dRevenue) * 100) : 0;
+                  const firstTimeCountry = CORRIDOR_CONTEXT.firstTimeCountry;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Business Capacity &amp; Corridor Context
+                      </h3>
+                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                        <div><dt className="text-neutral-500">Declared monthly revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">${declaredMonthlyRevenue.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Current wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
+                        <div><dt className="text-neutral-500">Wire vs monthly revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">{wirePctOfMonthlyRevenue}%</dd></div>
+                        <div><dt className="text-neutral-500">90-day outbound total</dt><dd className="font-medium text-neutral-900 tabular-nums">${outbound90d.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">90-day declared revenue (3 × monthly)</dt><dd className="font-medium text-neutral-900 tabular-nums">${declared90dRevenue.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">90-day outbound vs 90-day declared revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">{outbound90dPctOfDeclared90d}%</dd></div>
+                        <div><dt className="text-neutral-500">Indicator: First-time country</dt><dd className="font-medium text-neutral-900">{firstTimeCountry ? "Yes" : "No"}</dd></div>
+                        <div className="sm:col-span-2"><dt className="text-neutral-500">Countries used in last 12 months</dt><dd className="font-medium text-neutral-900">{CORRIDOR_CONTEXT.countriesLast12Months.length ? CORRIDOR_CONTEXT.countriesLast12Months.join(", ") : "—"}</dd></div>
+                      </dl>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        Wire vs monthly revenue: {wirePctOfMonthlyRevenue}%. 90-day outbound vs 90-day declared revenue: {outbound90dPctOfDeclared90d}%.
+                      </p>
+                      <p className="mt-1 text-sm text-neutral-700">
+                        This destination has{firstTimeCountry ? " not" : ""} been used previously.
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Industry Peer Benchmark Comparison — below Business Capacity & Corridor Context */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Industry Peer Benchmark Comparison
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Average outbound as % of revenue for similar NAICS industry</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.avgOutboundPctOfRevenueSimilarNAICS}%</dd></div>
+                    <div><dt className="text-neutral-500">Average international wire frequency for peer cohort</dt><dd className="font-medium text-neutral-900">{INDUSTRY_PEER_BENCHMARK.avgInternationalWireFreqPeerCohort}</dd></div>
+                    <div><dt className="text-neutral-500">Peer percentile ranking for this customer&apos;s outbound activity</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity}{["th", "st", "nd", "rd"][((INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity % 100) - 20) % 10] ?? "th"}</dd></div>
+                    <div><dt className="text-neutral-500">Peer percentile ranking for corridor usage</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage}{["th", "st", "nd", "rd"][((INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage % 100) - 20) % 10] ?? "th"}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    Customer outbound activity ranks in the {INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity}{(() => { const n = INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity; const ord = ["th", "st", "nd", "rd"][((n % 100) - 20) % 10] ?? "th"; return ord; })()} percentile compared to industry peers.
+                  </p>
+                  <p className="mt-1 text-sm text-neutral-700">
+                    Industry deviation severity: {INDUSTRY_PEER_BENCHMARK.industryDeviationSeverity}.
+                  </p>
+                </section>
+
+                {/* Historical Outbound Trend — below Business Capacity & Corridor Context */}
+                {selectedAlert && (() => {
+                  const currentWire = parseAmount(selectedAlert.amount);
+                  const months = HISTORICAL_OUTBOUND_MONTHS;
+                  const historicalMax = Math.max(...months.map((m) => m.largestSingle));
+                  const monthsWhereCurrentIsHighest = months.filter((m) => currentWire > m.largestSingle).length;
+                  const currentIsHighestInWindow = currentWire > historicalMax;
+                  const xMonths = currentIsHighestInWindow ? months.length : monthsWhereCurrentIsHighest;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Historical Outbound Trend
+                      </h3>
+                      <div className="mt-3 overflow-hidden rounded border border-neutral-200">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-neutral-200 bg-neutral-50">
+                              <th className="px-3 py-2 text-left font-medium text-neutral-600">Month</th>
+                              <th className="px-3 py-2 text-right font-medium text-neutral-600">Monthly total</th>
+                              <th className="px-3 py-2 text-right font-medium text-neutral-600">Largest single</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {months.map((m, i) => (
+                              <tr key={i} className="border-b border-neutral-100 last:border-0">
+                                <td className="px-3 py-2 text-neutral-700">{m.month}</td>
+                                <td className="px-3 py-2 text-right font-medium tabular-nums text-neutral-800">${m.total.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-right font-medium tabular-nums text-neutral-800">${m.largestSingle.toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
+                        <span className="text-neutral-600">Trend:</span>
+                        <span className="font-medium text-neutral-900">{HISTORICAL_TREND_INDICATOR}</span>
+                        <span className="text-neutral-500">·</span>
+                        <span className="text-neutral-600">Current wire:</span>
+                        <span className="font-medium tabular-nums text-neutral-900">{selectedAlert.amount}</span>
+                        <span className="text-neutral-600">vs historical max (6mo):</span>
+                        <span className="font-medium tabular-nums text-neutral-900">${historicalMax.toLocaleString()}</span>
+                        {currentWire > historicalMax && <span className="text-red-600 font-medium">(above max)</span>}
+                      </div>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        Current transaction is the highest outbound in {xMonths} month{xMonths === 1 ? "" : "s"}.
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Behavioral Risk Composite — below Historical Outbound Trend (6m) */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Behavioral Risk Composite
+                  </h3>
+                  <p className="mt-1.5 text-xs text-neutral-500">
+                    Behavioral consistency scale: 0 = highly inconsistent, 100 = fully consistent.
+                  </p>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Baseline deviation severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.baselineDeviationSeverity}</dd></div>
+                    <div><dt className="text-neutral-500">Velocity severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.velocitySeverity}</dd></div>
+                    <div><dt className="text-neutral-500">Corridor novelty severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.corridorNoveltySeverity}</dd></div>
+                    <div><dt className="text-neutral-500">Revenue strain severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.revenueStrainSeverity}</dd></div>
+                    <div>
+                      <dt className="text-neutral-500">Behavioral consistency score (0–100)</dt>
+                      <dd className="font-medium text-neutral-900 tabular-nums inline-flex items-center">
+                        {BEHAVIORAL_RISK_COMPOSITE.behavioralConsistencyScore}
+                        <BehavioralConsistencyTooltip />
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm font-medium text-neutral-800">
+                    Overall behavioral anomaly level: {getBehavioralAnomalySeverity(BEHAVIORAL_RISK_COMPOSITE.behavioralConsistencyScore)}. Lower scores indicate greater deviation from historical behavior.
+                  </p>
+                </section>
+
+                {/* Source of Funds & Movement Timing — below Historical Outbound Trend */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Source of Funds &amp; Movement Timing
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Largest inbound within 7 days prior to wire</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.largestInboundWithin7Days.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">Date of inbound</dt><dd className="font-medium text-neutral-900">{SOURCE_OF_FUNDS.dateOfInbound}</dd></div>
+                    <div><dt className="text-neutral-500">Date of outbound</dt><dd className="font-medium text-neutral-900">{SOURCE_OF_FUNDS.dateOfOutbound}</dd></div>
+                    <div><dt className="text-neutral-500">Time gap between inbound and outbound (hours)</dt><dd className="font-medium text-neutral-900 tabular-nums">{SOURCE_OF_FUNDS.timeGapHours}h</dd></div>
+                    <div><dt className="text-neutral-500">Account balance before inbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.accountBalanceBeforeInbound.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">Account balance after outbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.accountBalanceAfterOutbound.toLocaleString()}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    Funds were held for {SOURCE_OF_FUNDS.timeGapHours} hours before being wired out.
+                  </p>
+                </section>
+
+                {/* Inbound Counterparty & Source Legitimacy — below Source of Funds, above Short-Term Velocity */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Inbound Counterparty &amp; Source Legitimacy
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Inbound counterparty name (largest inbound funding this transaction)</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyName}</dd></div>
+                    <div><dt className="text-neutral-500">Counterparty industry</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyIndustry ?? "—"}</dd></div>
+                    <div><dt className="text-neutral-500">Counterparty jurisdiction</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyJurisdiction}</dd></div>
+                    <div><dt className="text-neutral-500">First-time sender indicator</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.firstTimeSender ? "Yes" : "No"}</dd></div>
+                    <div><dt className="text-neutral-500">Prior transaction count with this sender</dt><dd className="font-medium text-neutral-900 tabular-nums">{INBOUND_COUNTERPARTY.priorTransactionCountWithSender}</dd></div>
+                    <div><dt className="text-neutral-500">Sender internal risk rating</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.senderInternalRiskRating ?? "—"}</dd></div>
+                    <div><dt className="text-neutral-500">Sanctions screening result for sender</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.sanctionsScreeningResult}</dd></div>
+                    <div><dt className="text-neutral-500">Adverse media indicator</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.adverseMediaIndicator ? "Yes" : "No"}</dd></div>
+                    <div><dt className="text-neutral-500">Network overlap (other customers transacting with this sender)</dt><dd className="font-medium text-neutral-900 tabular-nums">{INBOUND_COUNTERPARTY.networkOverlap}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    Inbound funds originated from a {INBOUND_COUNTERPARTY.firstTimeSender ? "new" : "existing"} counterparty.
+                  </p>
+                  <p className="mt-1 text-sm text-neutral-700">
+                    Source legitimacy risk: {INBOUND_COUNTERPARTY.sourceLegitimacyRisk}.
+                  </p>
+                </section>
+
+                {/* Short-Term Velocity Analysis — below Source of Funds & Movement Timing, above Beneficiary Risk */}
+                {(() => {
+                  const v = SHORT_TERM_VELOCITY;
+                  const spikeMultiple7d = v.historical7DayAvgOutbound > 0 ? (v.totalOutboundLast7Days / v.historical7DayAvgOutbound) : 0;
+                  const anomalyDetected = spikeMultiple7d >= 1.5;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Short-Term Velocity Analysis
+                      </h3>
+                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                        <div><dt className="text-neutral-500">Total outbound in last 7 days</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.totalOutboundLast7Days.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Historical 7-day average outbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.historical7DayAvgOutbound.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Spike multiple (7d)</dt><dd className="font-medium text-neutral-900 tabular-nums">{spikeMultiple7d.toFixed(1)}x normal</dd></div>
+                        <div><dt className="text-neutral-500">Total outbound in last 30 days</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.totalOutboundLast30Days.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Historical 30-day average</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.historical30DayAvg.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Short-term spike severity indicator</dt><dd className="font-medium text-neutral-900">{v.spikeSeverity}</dd></div>
+                      </dl>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        7-day outbound volume is {spikeMultiple7d.toFixed(1)} times historical norm.
+                      </p>
+                      <p className="mt-1 text-sm text-neutral-700">
+                        Short-term velocity anomaly detected: {anomalyDetected ? "Yes" : "No"}.
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Beneficiary Risk & Relationship Assessment — below Source of Funds & Movement Timing */}
+                {(() => {
+                  const b = BENEFICIARY_RISK;
+                  const isNewAndElevated = b.firstTimeBeneficiary && b.priorTransactionCount === 0;
+                  const summaryText = isNewAndElevated
+                    ? "Beneficiary relationship is new and located in an elevated-risk jurisdiction."
+                    : "Beneficiary has prior transaction history and established relationship.";
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Beneficiary Risk &amp; Relationship Assessment
+                      </h3>
+                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                        <div><dt className="text-neutral-500">Beneficiary entity age (incorporation date)</dt><dd className="font-medium text-neutral-900">{b.incorporationDate ?? "—"}</dd></div>
+                        <div><dt className="text-neutral-500">Industry classification</dt><dd className="font-medium text-neutral-900">{b.industryClassification ?? "—"}</dd></div>
+                        <div><dt className="text-neutral-500">Jurisdiction risk tier</dt><dd className="font-medium text-neutral-900">{b.jurisdictionRiskTier}</dd></div>
+                        <div><dt className="text-neutral-500">First-time beneficiary indicator</dt><dd className="font-medium text-neutral-900">{b.firstTimeBeneficiary ? "Yes" : "No"}</dd></div>
+                        <div><dt className="text-neutral-500">Prior transaction count with this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">{b.priorTransactionCount}</dd></div>
+                        <div><dt className="text-neutral-500">Sanctions screening result</dt><dd className="font-medium text-neutral-900">{b.sanctionsScreeningResult}</dd></div>
+                      </dl>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        {summaryText}
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Network Exposure & Counterparty Linkage — below Beneficiary Risk, above Stated Purpose & Documentation Review */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Network Exposure &amp; Counterparty Linkage
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Number of other customers who transacted with this beneficiary in last 90 days</dt><dd className="font-medium text-neutral-900 tabular-nums">{NETWORK_EXPOSURE.otherCustomersWithThisBeneficiary90d}</dd></div>
+                    <div><dt className="text-neutral-500">Number of those alerts escalated or SAR filed</dt><dd className="font-medium text-neutral-900 tabular-nums">{NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled}</dd></div>
+                    <div><dt className="text-neutral-500">Cluster risk indicator</dt><dd className="font-medium text-neutral-900">{NETWORK_EXPOSURE.clusterRiskIndicator}</dd></div>
+                    <div><dt className="text-neutral-500">Corridor concentration score</dt><dd className="font-medium text-neutral-900">{NETWORK_EXPOSURE.corridorConcentrationScore}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    This beneficiary appears in {NETWORK_EXPOSURE.otherCustomersWithThisBeneficiary90d} other alerts institution-wide.
+                  </p>
+                  <p className="mt-1 text-sm text-neutral-700">
+                    Cluster risk: {NETWORK_EXPOSURE.clusterRiskIndicator}.
+                  </p>
+                </section>
+
+                {/* Exposure Aggregation Summary — below Network Exposure & Counterparty Linkage */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Exposure Aggregation Summary
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Total lifetime exposure to this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.totalLifetimeExposureBeneficiary.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">Total 90-day exposure to this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.total90DayExposureBeneficiary.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">Total lifetime exposure to this country</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.totalLifetimeExposureCountry.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">Total 90-day exposure to this country</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.total90DayExposureCountry.toLocaleString()}</dd></div>
+                    <div><dt className="text-neutral-500">% of outbound volume directed to this jurisdiction (90d)</dt><dd className="font-medium text-neutral-900 tabular-nums">{EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d}%</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                    Country concentration risk: {EXPOSURE_AGGREGATION.countryConcentrationRisk}.
+                  </p>
+                  <p className="mt-1 text-sm text-neutral-700">
+                    Beneficiary exposure concentration: {EXPOSURE_AGGREGATION.beneficiaryExposureConcentration}.
+                  </p>
+                </section>
+
+                {/* Stated Purpose & Documentation Review — below Beneficiary Risk & Relationship Assessment */}
+                {(() => {
+                  const d = STATED_PURPOSE_DOCS;
+                  const priorDocPct = d.priorTradeWiresTotal > 0 ? Math.round((d.priorTradeWiresWithDocumentationCount / d.priorTradeWiresTotal) * 100) : 0;
+                  const documentationGapPresent = !d.documentationAttached;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Stated Purpose &amp; Documentation Review
+                      </h3>
+                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                        <div className="sm:col-span-2"><dt className="text-neutral-500">Payment reference text</dt><dd className="font-medium text-neutral-900">{d.paymentReferenceText}</dd></div>
+                        <div><dt className="text-neutral-500">Documentation attached</dt><dd className="font-medium text-neutral-900">{d.documentationAttached ? "Yes" : "No"}</dd></div>
+                        <div><dt className="text-neutral-500">Prior trade wires with documentation count</dt><dd className="font-medium text-neutral-900 tabular-nums">{d.priorTradeWiresWithDocumentationCount} of {d.priorTradeWiresTotal}</dd></div>
+                        <div><dt className="text-neutral-500">Average documented trade wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{d.averageDocumentedTradeWireAmount != null ? `$${d.averageDocumentedTradeWireAmount.toLocaleString()}` : "—"}</dd></div>
+                        <div><dt className="text-neutral-500">Documentation gap</dt><dd className="font-medium text-neutral-900">{documentationGapPresent ? "Present" : "Not Present"}</dd></div>
+                      </dl>
+                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
+                        Prior trade wires included documentation in {priorDocPct}% of cases.
+                      </p>
+                      <p className="mt-1 text-sm text-neutral-700">
+                        {d.documentationAttached ? "Supporting documentation on file." : "No supporting documentation currently on file."}
+                      </p>
+                    </section>
+                  );
+                })()}
+
+                {/* Mitigating Factors Assessment */}
+                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Mitigating Factors Assessment
+                  </h3>
+                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div><dt className="text-neutral-500">Account tenure (months with institution)</dt><dd className="font-medium text-neutral-900 tabular-nums">{MITIGATING_FACTORS.accountTenureMonths}</dd></div>
+                    <div><dt className="text-neutral-500">Date of last Enhanced Due Diligence (EDD)</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.dateOfLastEDD ?? "—"}</dd></div>
+                    <div><dt className="text-neutral-500">Beneficial ownership verified</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.beneficialOwnershipVerified ? "Yes" : "No"}</dd></div>
+                    <div><dt className="text-neutral-500">KYC review status</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.kycReviewStatus}</dd></div>
+                    <div className="sm:col-span-2"><dt className="text-neutral-500">Historical alert resolution pattern</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.historicalAlertResolutionPattern}</dd></div>
+                    <div><dt className="text-neutral-500">Relationship stability indicator</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.relationshipStabilityIndicator}</dd></div>
+                  </dl>
+                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm font-medium text-neutral-800">
+                    Mitigation strength: {MITIGATING_FACTORS.mitigationStrength}.
+                  </p>
+                </section>
+                </>
+              )}
+
+              {activeTab === "Other" && analysis && (
+                <>
+                {/* Business Behavior Alignment — expected (KYC) vs observed (72–90d) */}
+                {(() => {
+                  const declared90dRevenue = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
+                  const revenuePct90d = declared90dRevenue > 0 ? (BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow / declared90dRevenue) * 100 : 0;
+                  const mismatchCount = BUSINESS_BEHAVIOR_ROWS.filter((r) => !r.match).length;
+                  const revenueWarning = revenuePct90d >= REVENUE_EXPOSURE_RED_PCT ? "red" : revenuePct90d >= REVENUE_EXPOSURE_AMBER_PCT ? "amber" : null;
+                  return (
+                    <section className="rounded-lg border border-neutral-200 bg-white shadow-sm">
+                      <h3 className="border-b border-neutral-100 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                        Business Behavior Alignment
+                      </h3>
+                      <p className="px-4 pt-3 text-xs text-neutral-500">
+                        Expected vs Observed (last 72–90 days)
+                      </p>
+                      <div className="p-4">
+                        <div className="overflow-hidden rounded border border-neutral-200">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-neutral-200 bg-neutral-50">
+                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Dimension</th>
+                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Expected (from KYC/onboarding)</th>
+                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Observed (last 72–90 days)</th>
+                                <th className="px-3 py-2 text-center font-medium text-neutral-600 w-16">Match</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {BUSINESS_BEHAVIOR_ROWS.map((row, i) => (
+                                <tr key={i} className="border-b border-neutral-100 last:border-0">
+                                  <td className="px-3 py-2 font-medium text-neutral-700">{row.dimension}</td>
+                                  <td className="px-3 py-2 text-neutral-600">{row.expected}</td>
+                                  <td className="px-3 py-2 text-neutral-700">{row.observed}</td>
+                                  <td className="px-3 py-2 text-center">
+                                    {row.match ? <span className="text-emerald-600" aria-label="Match">✓</span> : <span className="text-red-600" aria-label="Mismatch">✗</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="mt-4">
+                          <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Revenue exposure</h4>
+                          {(() => {
+                            const expected90 = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
+                            const observed90 = BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow;
+                            const diff = observed90 - expected90;
+                            return (
+                              <dl className="grid grid-cols-1 gap-1 text-xs sm:grid-cols-[auto_1fr] sm:gap-x-4">
+                                <dt className="text-neutral-600">Expected 90-day revenue:</dt>
+                                <dd className="font-medium text-neutral-800 tabular-nums">${expected90.toLocaleString()}</dd>
+                                <dt className="text-neutral-600">Observed 90-day deposits:</dt>
+                                <dd className="font-medium text-neutral-800 tabular-nums">${observed90.toLocaleString()}</dd>
+                                <dt className="text-neutral-600">Difference:</dt>
+                                <dd className="font-medium tabular-nums">{diff >= 0 ? "+" : ""}${Math.abs(diff).toLocaleString()}</dd>
+                                <dt className="text-neutral-600">Status:</dt>
+                                <dd className="font-medium text-neutral-800">{diff > 0 ? "Exceeds expected revenue" : diff < 0 ? "Below expected revenue" : "In line with expected revenue"}</dd>
+                              </dl>
+                            );
+                          })()}
+                          <p className="mt-2 text-xs text-neutral-600">
+                            {revenueWarning === "red" ? (
+                              <span className="text-red-600 font-medium">{revenuePct90d.toFixed(0)}% of declared 90-day revenue (high exposure)</span>
+                            ) : revenueWarning === "amber" ? (
+                              <span className="text-neutral-700">{revenuePct90d.toFixed(0)}% of declared 90-day revenue (elevated exposure)</span>
+                            ) : (
+                              <>{revenuePct90d.toFixed(0)}% of declared 90-day revenue</>
+                            )}
+                          </p>
+                        </div>
+                        <div className="mt-4 pt-3 border-t border-neutral-200">
+                          <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Alignment Conclusion</h4>
+                          <ul className="text-sm text-neutral-700 space-y-1 list-disc list-inside">
+                            <li>{mismatchCount} of {BUSINESS_BEHAVIOR_ROWS.length} behavioral dimensions inconsistent with declared business profile.</li>
+                            <li>Deposits materially exceed expected frequency and size.</li>
+                            <li>90-day deposits represent {revenuePct90d.toFixed(0)}% of declared 90-day revenue.</li>
+                          </ul>
+                          <p className="mt-2 text-sm font-bold text-neutral-900">
+                            Conclusion: Behavior inconsistent with KYC profile. Escalation criteria met.
+                          </p>
+                        </div>
+                      </div>
+                    </section>
+                  );
+                })()}
+
+                {/* Risk Sensitivity Analysis — simulated impact */}
+                <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-md">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    Risk Sensitivity Analysis
+                  </h3>
+                  <p className="mt-2 text-sm text-neutral-600">
+                    Simulated impact on risk score if specific drivers were
+                    mitigated.
+                  </p>
+                  <div className="mt-4 space-y-4">
+                    {RISK_SENSITIVITY.map((item, i) => (
+                      <div
+                        key={i}
+                        className="rounded-lg border border-neutral-100 p-4 transition-shadow duration-200 hover:shadow-md"
+                      >
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <span className="text-sm font-medium text-neutral-900">
+                            {item.factor}
+                          </span>
+                          <span className="text-sm font-semibold tabular-nums text-red-600">
+                            {item.delta} points
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-neutral-500">
+                            Projected score:
+                          </span>
+                          <span className="text-sm font-bold tabular-nums text-neutral-900">
+                            {item.projected_score}%
+                          </span>
+                        </div>
+                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-100">
+                          <div
+                            className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                            style={{
+                              width: `${item.projected_score}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="mt-2 text-xs leading-snug text-neutral-600">
+                          {item.explanation}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
 
                 {/* Decision Defensibility */}
                 <section className="rounded-xl border border-neutral-200 bg-white p-6 shadow-sm">
@@ -1362,6 +2240,8 @@ export default function Home() {
                     </div>
                   </div>
                 </section>
+
+                <TopRiskDrivers />
 
                 {/* Cross-Case Intelligence */}
                 <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
@@ -1447,170 +2327,81 @@ export default function Home() {
                     </p>
                   </div>
                 </section>
-
-                {/* Risk Sensitivity Analysis — simulated impact */}
-                <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-md">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Risk Sensitivity Analysis
-                  </h3>
-                  <p className="mt-2 text-sm text-neutral-600">
-                    Simulated impact on risk score if specific drivers were
-                    mitigated.
-                  </p>
-                  <div className="mt-4 space-y-4">
-                    {RISK_SENSITIVITY.map((item, i) => (
-                      <div
-                        key={i}
-                        className="rounded-lg border border-neutral-100 p-4 transition-shadow duration-200 hover:shadow-md"
-                      >
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="text-sm font-medium text-neutral-900">
-                            {item.factor}
-                          </span>
-                          <span className="text-sm font-semibold tabular-nums text-red-600">
-                            {item.delta} points
-                          </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span className="text-xs text-neutral-500">
-                            Projected score:
-                          </span>
-                          <span className="text-sm font-bold tabular-nums text-neutral-900">
-                            {item.projected_score}%
-                          </span>
-                        </div>
-                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-100">
-                          <div
-                            className="h-full rounded-full bg-blue-600 transition-all duration-300"
-                            style={{
-                              width: `${item.projected_score}%`,
-                            }}
-                          />
-                        </div>
-                        <p className="mt-2 text-xs leading-snug text-neutral-600">
-                          {item.explanation}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                {/* 5. Evidence Traceability — tabs */}
-                <section className="rounded-lg border border-neutral-200 bg-white shadow-sm">
-                  <h3 className="border-b border-neutral-100 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Evidence Traceability
-                  </h3>
-                  <div className="flex border-b border-neutral-200">
-                    {(
-                      [
-                        ["transactions", "Transactions"],
-                        ["customer_attributes", "Customer attributes"],
-                        ["rule_triggers", "Rule triggers"],
-                      ] as const
-                    ).map(([tab, label]) => (
-                      <button
-                        key={tab}
-                        type="button"
-                        onClick={() => setEvidenceTab(tab)}
-                        className={`px-4 py-2 text-xs font-medium transition-colors ${
-                          evidenceTab === tab
-                            ? "border-b-2 border-neutral-900 text-neutral-900"
-                            : "text-neutral-500 hover:text-neutral-700"
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="p-4">
-                    {evidenceTab === "transactions" && (
-                      <div className="overflow-hidden rounded border border-neutral-200">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="border-b border-neutral-200 bg-neutral-50">
-                              <th className="px-2.5 py-1.5 text-left font-medium text-neutral-600">
-                                Date
-                              </th>
-                              <th className="px-2.5 py-1.5 text-left font-medium text-neutral-600">
-                                Amount
-                              </th>
-                              <th className="px-2.5 py-1.5 text-left font-medium text-neutral-600">
-                                Country
-                              </th>
-                              <th className="px-2.5 py-1.5 text-left font-medium text-neutral-600">
-                                Flag reason
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {analysis.evidence_traceability.key_transactions.map(
-                              (tx, i) => (
-                                <tr
-                                  key={i}
-                                  className="border-b border-neutral-100 last:border-0"
-                                >
-                                  <td className="px-2.5 py-1.5 text-neutral-700">
-                                    {tx.date}
-                                  </td>
-                                  <td className="px-2.5 py-1.5 font-medium text-neutral-700">
-                                    {tx.amount}
-                                  </td>
-                                  <td className="px-2.5 py-1.5 text-neutral-700">
-                                    {tx.country}
-                                  </td>
-                                  <td className="px-2.5 py-1.5 text-neutral-600">
-                                    {tx.flag_reason}
-                                  </td>
-                                </tr>
-                              )
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                    {evidenceTab === "customer_attributes" && (
-                      <div className="overflow-hidden rounded border border-neutral-200">
-                        <table className="w-full text-xs">
-                          <tbody>
-                            {analysis.evidence_traceability.customer_attributes.map(
-                              (attr, i) => (
-                                <tr
-                                  key={i}
-                                  className="border-b border-neutral-100 last:border-0"
-                                >
-                                  <td className="w-1/3 px-2.5 py-1.5 text-neutral-600">
-                                    {attr.label}
-                                  </td>
-                                  <td className="px-2.5 py-1.5 font-medium text-neutral-700">
-                                    {attr.value}
-                                  </td>
-                                </tr>
-                              )
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                    {evidenceTab === "rule_triggers" && (
-                      <div className="flex flex-wrap gap-1.5">
-                        {analysis.evidence_traceability.rule_triggers.map(
-                          (rule, i) => (
-                            <span
-                              key={i}
-                              className="rounded border border-neutral-200 bg-neutral-50 px-2 py-0.5 font-mono text-xs text-neutral-700"
-                            >
-                              {rule}
-                            </span>
-                          )
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </section>
                 </>
               )}
 
-              {activeTab === "SAR Filing" && (
+              {activeTab === "Initial Escalation Record" && (
+                <div className="space-y-4">
+                  {escalationRecord ? (
+                    <>
+                      <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                          Escalation Rationale (locked)
+                        </h3>
+                        <p className="mt-2 text-xs text-neutral-500">
+                          This rationale was captured at escalation and cannot be edited. Amendments require versioning and a log entry.
+                        </p>
+                        <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-800">
+                          {escalationRecord.rationale}
+                        </pre>
+                      </section>
+                      <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
+                          Escalation metadata
+                        </h3>
+                        <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                          <div><dt className="text-neutral-500">Escalated by</dt><dd className="font-medium text-neutral-900">{escalationRecord.userId}</dd></div>
+                          <div><dt className="text-neutral-500">Escalation timestamp</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.timestamp}</dd></div>
+                          <div><dt className="text-neutral-500">Triggers met at escalation</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.triggersMet} of {escalationRecord.triggersTotal}</dd></div>
+                          <div><dt className="text-neutral-500">Policy threshold</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.threshold}</dd></div>
+                          <div><dt className="text-neutral-500">Deviation % (90-day baseline)</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.deviationPct}%</dd></div>
+                          <div><dt className="text-neutral-500">Time gap (hours)</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.timeGapHours}h</dd></div>
+                        </dl>
+                      </section>
+                      <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
+                          Trigger snapshot at time of escalation
+                        </h3>
+                        <ul className="space-y-1.5 text-sm">
+                          {escalationRecord.triggerSnapshot.map((t, i) => (
+                            <li key={i} className="flex items-center gap-2">
+                              {t.met ? <span className="text-red-600" aria-label="Met">✓</span> : <span className="text-neutral-300" aria-label="Not met">✗</span>}
+                              <span className={t.met ? "text-neutral-900" : "text-neutral-500"}>{t.label}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                      <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
+                          Case status transition history
+                        </h3>
+                        <ul className="space-y-2 text-sm">
+                          {caseStatusTransitionHistory.map((t, i) => (
+                            <li key={i} className="flex flex-wrap gap-x-2 gap-y-0.5">
+                              <span className="font-medium text-neutral-500">{t.from}</span>
+                              <span aria-hidden>→</span>
+                              <span className="font-medium text-neutral-900">{t.to}</span>
+                              <span className="text-neutral-500">· {t.timestamp}</span>
+                              <span className="text-neutral-500">· {t.userId}</span>
+                            </li>
+                          ))}
+                          {caseStatusTransitionHistory.length === 0 && (
+                            <li className="text-neutral-500">No transitions recorded yet.</li>
+                          )}
+                        </ul>
+                      </section>
+                    </>
+                  ) : (
+                    <section className="rounded-lg border border-neutral-200 bg-white p-6 shadow-sm">
+                      <p className="text-sm text-neutral-600">
+                        No escalation record yet. Use the <strong>Escalate</strong> button in the card above and confirm escalation to create the Initial Escalation Record.
+                      </p>
+                    </section>
+                  )}
+                </div>
+              )}
+
+              {activeTab === "Other" && (
                 <>
                 {/* 7. Intelligent SAR Builder */}
                 <section className="rounded-xl border border-neutral-200 bg-white shadow-sm">
@@ -2003,6 +2794,57 @@ export default function Home() {
                 className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800"
               >
                 Submit override
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Escalation – Initial Escalation Record modal */}
+      {escalationModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setEscalationModalOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-escalation-title"
+        >
+          <div
+            className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col rounded-xl border border-neutral-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="confirm-escalation-title" className="shrink-0 border-b border-neutral-200 px-6 py-4 text-base font-semibold text-neutral-900">
+              Confirm Escalation – Initial Escalation Record
+            </h2>
+            <p className="shrink-0 px-6 pt-3 text-xs text-neutral-500">
+              Review and edit escalation rationale if needed. After confirmation, the rationale is locked and cannot be edited without versioning and a log amendment.
+            </p>
+            <div className="flex-1 min-h-0 overflow-auto px-6 py-3">
+              <textarea
+                value={escalationRationaleDraft}
+                onChange={(e) => setEscalationRationaleDraft(e.target.value)}
+                rows={16}
+                className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400"
+                placeholder="Escalation rationale…"
+              />
+            </div>
+            <div className="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-neutral-200">
+              <button
+                type="button"
+                onClick={() => {
+                  setEscalationModalOpen(false);
+                  setEscalationRationaleDraft("");
+                }}
+                className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleEscalateConfirm}
+                className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800"
+              >
+                Confirm Escalation
               </button>
             </div>
           </div>
