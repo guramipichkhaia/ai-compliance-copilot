@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getPolicyConfig, getDefaultPolicyConfig, type PolicyConfig } from "@/lib/policy-config";
+import { evaluateTrigger } from "@/lib/rule-evaluator";
+import { getCards, type CaseFieldDef } from "@/lib/case-field-registry";
 
 type RiskLevel = "High" | "Medium" | "Low";
 
@@ -296,7 +298,7 @@ const SAR_NARRATIVE_SECTIONS = [
   {
     title: "Activity summary",
     content:
-      "Between [DATE_RANGE], subject conducted [TX_COUNT] outbound transactions totaling [TOTAL_AMOUNT]. Activity concentrated in 14-day window; for baseline deviation see Baseline & Beneficiary Verification section.",
+      "Between [DATE_RANGE], subject conducted [TX_COUNT] outbound transactions totaling [TOTAL_AMOUNT]. Activity concentrated in 14-day window; for baseline deviation see Transaction Deviation Analysis section.",
     tokens: ["DATE_RANGE", "TX_COUNT", "TOTAL_AMOUNT"],
   },
   {
@@ -360,7 +362,7 @@ const CUSTOMER_RISK_DRIFT = {
   alertFrequencyTrend: "Escalating" as "Stable" | "Increasing" | "Escalating",
 };
 
-/** Baseline & Beneficiary Verification — mock 90-day baseline for comparison */
+/** Transaction Deviation Analysis — mock 90-day baseline for comparison */
 const BASELINE_VERIFICATION = {
   avgOutboundWire90d: 18200,
   largestPriorWire90d: 28500,
@@ -372,13 +374,13 @@ function parseAmount(amountStr: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Baseline deviation %: ((current - baselineAvg) / baselineAvg) * 100, rounded. Used only in Baseline & Beneficiary Verification and Case Narrative Draft. */
+/** Baseline deviation %: ((current - baselineAvg) / baselineAvg) * 100, rounded. Used only in Transaction Deviation Analysis and Case Narrative Draft. */
 function getBaselineDeviationPct(currentAmount: number): number {
   const avg = BASELINE_VERIFICATION.avgOutboundWire90d;
   return avg > 0 ? Math.round(((currentAmount - avg) / avg) * 100) : 0;
 }
 
-/** Business Capacity & Corridor Context — commercial plausibility */
+/** Corridor Context — commercial plausibility */
 const CORRIDOR_CONTEXT = {
   declaredMonthlyRevenue: BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue,
   avgMonthlyOutbound90d: 17200,
@@ -405,22 +407,6 @@ const HISTORICAL_OUTBOUND_MONTHS: { month: string; total: number; largestSingle:
   { month: "Mar 2025", total: 38900, largestSingle: 32100 },
 ];
 const HISTORICAL_TREND_INDICATOR: "Stable" | "Increasing" | "Volatile" = "Increasing";
-
-/** Behavioral Risk Composite — investigation-derived severity */
-const BEHAVIORAL_RISK_COMPOSITE = {
-  baselineDeviationSeverity: "High" as "Low" | "Moderate" | "High",
-  velocitySeverity: "High" as "Low" | "Moderate" | "High",
-  corridorNoveltySeverity: "Moderate" as "Low" | "Moderate" | "High",
-  revenueStrainSeverity: "High" as "Low" | "Moderate" | "High",
-  behavioralConsistencyScore: 28,
-};
-
-/** Anomaly severity from behavioral consistency score: &lt;40 = High, 40–70 = Moderate, &gt;70 = Low. Lower score = greater deviation. */
-function getBehavioralAnomalySeverity(score: number): "Low" | "Moderate" | "High" {
-  if (score < 40) return "High";
-  if (score <= 70) return "Moderate";
-  return "Low";
-}
 
 /** Source of Funds & Movement Timing — inbound/outbound and timing */
 const SOURCE_OF_FUNDS = {
@@ -493,35 +479,91 @@ const STATED_PURPOSE_DOCS = {
   averageDocumentedTradeWireAmount: 11200 as number | null,
 };
 
-/** Mitigating Factors Assessment — balancing escalation decisions */
-const MITIGATING_FACTORS = {
-  accountTenureMonths: 18,
-  dateOfLastEDD: "2024-06-15" as string | null,
-  beneficialOwnershipVerified: true,
-  kycReviewStatus: "Current" as "Current" | "Expired",
-  historicalAlertResolutionPattern: "3 of 5 prior alerts closed as false positives",
-  relationshipStabilityIndicator: "Stable" as "Stable" | "Volatile",
-  mitigationStrength: "Moderate" as "Weak" | "Moderate" | "Strong",
-};
+/** Build case data object for schema-driven rule evaluation. Keys match case field registry; aliases kept for backward compatibility. */
+function buildCaseDataForEvaluation(currentAmount: number | undefined): Record<string, unknown> {
+  const riskOrder = { Low: 0, Medium: 1, High: 2 } as const;
+  const currentRisk = (CUSTOMER_RISK_DRIFT.currentInternalRiskRating as keyof typeof riskOrder) || "Low";
+  const onboardingRisk = (CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding as keyof typeof riskOrder) || "Low";
+  const riskRatingElevated = (riskOrder[currentRisk] ?? 0) > (riskOrder[onboardingRisk] ?? 0);
+  const velocityMultiple = SHORT_TERM_VELOCITY.historical7DayAvgOutbound > 0
+    ? SHORT_TERM_VELOCITY.totalOutboundLast7Days / SHORT_TERM_VELOCITY.historical7DayAvgOutbound
+    : 0;
+  const spikeMultiple7d = Math.round(velocityMultiple * 10) / 10;
+  const timeGapHours = SOURCE_OF_FUNDS.timeGapHours;
+  const documentationGapPresent = !STATED_PURPOSE_DOCS.documentationAttached;
+  const firstTimeCountry = CORRIDOR_CONTEXT.firstTimeCountry;
+  const pctOutboundVolumeJurisdiction90d = EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d;
+  const adverseMediaIndicator = INBOUND_COUNTERPARTY.adverseMediaIndicator;
+  const alertsEscalatedOrSarFiled = NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled;
 
-/** Policy Escalation Mapping — internal triggers checklist. All thresholds and operators from Policy Configuration. */
-function applyNumericComparison(observed: number, op: string, threshold: number): boolean {
-  switch (op) {
-    case ">": return observed > threshold;
-    case ">=": return observed >= threshold;
-    case "<": return observed < threshold;
-    case "<=": return observed <= threshold;
-    case "=": return observed === threshold;
-    default: return observed > threshold;
+  const data: Record<string, unknown> = {
+    // Registry keys (single source of truth for cards + triggers)
+    totalOutbound7d: SHORT_TERM_VELOCITY.totalOutboundLast7Days,
+    historicalOutbound7d: SHORT_TERM_VELOCITY.historical7DayAvgOutbound,
+    spikeMultiple7d,
+    largestInbound7d: SOURCE_OF_FUNDS.largestInboundWithin7Days,
+    dateOfInbound: SOURCE_OF_FUNDS.dateOfInbound,
+    dateOfOutbound: SOURCE_OF_FUNDS.dateOfOutbound,
+    timeGapHours,
+    firstTimeCountry,
+    firstTimeBeneficiary: BENEFICIARY_RISK.firstTimeBeneficiary,
+    destinationJurisdictionRiskTier: BENEFICIARY_RISK.jurisdictionRiskTier,
+    total90dExposureBeneficiary: EXPOSURE_AGGREGATION.total90DayExposureBeneficiary,
+    total90dExposureCountry: EXPOSURE_AGGREGATION.total90DayExposureCountry,
+    pctOutboundVolumeJurisdiction90d,
+    documentationGapPresent,
+    priorDocumentedTradeWiresCount: STATED_PURPOSE_DOCS.priorTradeWiresWithDocumentationCount,
+    priorTradeWiresTotal: STATED_PURPOSE_DOCS.priorTradeWiresTotal,
+    averageDocumentedTradeWireAmount: STATED_PURPOSE_DOCS.averageDocumentedTradeWireAmount ?? 0,
+    paymentReferenceText: STATED_PURPOSE_DOCS.paymentReferenceText,
+    riskRatingOnboarding: CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding,
+    currentInternalRiskRating: CUSTOMER_RISK_DRIFT.currentInternalRiskRating,
+    alertsLast90Days: CUSTOMER_RISK_DRIFT.alertsLast90Days,
+    priorSarFilings: CUSTOMER_RISK_DRIFT.priorSarFilings,
+    priorSarCount: CUSTOMER_RISK_DRIFT.priorSarCount,
+    riskRatingElevated,
+    relatedCustomersCount: NETWORK_EXPOSURE.otherCustomersWithThisBeneficiary90d,
+    alertsEscalatedOrSarFiled,
+    adverseMediaIndicator,
+  };
+
+  // Backward compatibility: old trigger fieldKeys still resolve
+  data.rapidMovementHours = timeGapHours;
+  data.velocity7dMultiple = spikeMultiple7d;
+  data.documentationGap = documentationGapPresent;
+  data.corridorNovelty = firstTimeCountry;
+  data.priorSARCount = alertsEscalatedOrSarFiled;
+  data.concentrationPercent = pctOutboundVolumeJurisdiction90d;
+  data.negativeMediaRisk = adverseMediaIndicator;
+
+  return data;
+}
+
+/** Format a case data value for display in alert detail cards (uses registry field type). */
+function formatCaseValue(value: unknown, field: CaseFieldDef): string {
+  if (value === undefined || value === null) return "—";
+  switch (field.type) {
+    case "currency":
+      return typeof value === "number" && Number.isFinite(value) ? `$${value.toLocaleString()}` : String(value);
+    case "percentage":
+      return typeof value === "number" && Number.isFinite(value) ? `${value}%` : String(value);
+    case "boolean":
+      return value === true || value === "true" ? "Yes" : "No";
+    case "hours":
+      return typeof value === "number" && Number.isFinite(value) ? `${value}h` : String(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value)
+        ? (field.unit ? `${value}${field.unit}` : value.toLocaleString())
+        : String(value);
+    default:
+      return String(value);
   }
 }
-function formatPolicyRule(op: string, value: number, unit: string): string {
-  const sym = op === ">=" ? "≥" : op === "<=" ? "≤" : op;
-  const suffix = unit === "percentage" || unit === "percentile" ? "%" : unit === "hours" ? "h" : unit === "multiplier" ? "×" : "";
-  return `${sym} ${value}${suffix}`;
-}
 
+/** Policy Escalation Mapping — all triggers (predefined + custom) evaluated via caseData and rule engine. */
 type PolicyTrigger = {
+  id: string;
+  fieldKey: string;
   label: string;
   met: boolean;
   immediate?: boolean;
@@ -529,136 +571,114 @@ type PolicyTrigger = {
   observedValue?: string;
   policyRuleLabel?: string;
   resultLabel: "Met" | "Not Met";
+  /** Human-readable condition text for display on cards (e.g. "current transaction ≥ 2.0× 90-day average"). */
+  conditionDescription: string;
 };
+
+function getTriggerConditionDescription(
+  fieldKey: string,
+  operator: string,
+  threshold: number | string | boolean,
+  observedValue: string,
+  met: boolean
+): string {
+  const th = threshold;
+  if (fieldKey === "timeGapHours" || fieldKey === "rapidMovementHours") {
+    const hours = typeof th === "number" ? th : 72;
+    return met
+      ? `funds moved within ${observedValue} of inbound funding`
+      : `movement exceeds policy threshold (${hours}h)`;
+  }
+  if (fieldKey === "spikeMultiple7d" || fieldKey === "velocity7dMultiple") {
+    return met
+      ? `7-day transaction volume exceeds ${th}× historical average`
+      : `7-day volume below ${th}× historical average`;
+  }
+  if (fieldKey === "firstTimeBeneficiary" || fieldKey === "documentationGapPresent" || fieldKey === "documentationGap") {
+    return met ? "condition satisfied" : "condition not satisfied";
+  }
+  if (fieldKey === "firstTimeCountry" || fieldKey === "corridorNovelty") {
+    return met ? "First-time country: Yes" : "First-time country: No";
+  }
+  if (fieldKey === "destinationJurisdictionRiskTier") {
+    return met ? "country on FATF high-risk list" : "destination not on FATF high-risk list";
+  }
+  if (fieldKey === "pctOutboundVolumeJurisdiction90d" || fieldKey === "concentrationPercent") {
+    return met ? "over 50% of recent outbound volume to high-risk jurisdiction" : "below concentration threshold";
+  }
+  if (fieldKey === "riskRatingElevated") {
+    return met ? "customer's risk rating has increased recently" : "risk rating unchanged";
+  }
+  if (fieldKey === "adverseMediaIndicator" || fieldKey === "negativeMediaRisk") {
+    return met ? "credible adverse media linked to financial crime" : "no adverse media identified";
+  }
+  return observedValue ? `threshold: ${operator} ${String(th)}; observed: ${observedValue}` : `${operator} ${String(th)}`;
+}
+
 function getPolicyEscalationTriggers(
-  timeGapHours: number,
+  _timeGapHours: number,
   currentAmount: number | undefined,
   config: PolicyConfig
 ): PolicyTrigger[] {
-  const baselineDeviationPct = currentAmount != null ? getBaselineDeviationPct(currentAmount) : 0;
-  const riskOrder = { Low: 0, Medium: 1, High: 2 } as const;
-  const currentRisk = (CUSTOMER_RISK_DRIFT.currentInternalRiskRating as keyof typeof riskOrder) || "Low";
-  const onboardingRisk = (CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding as keyof typeof riskOrder) || "Low";
-  const riskRatingElevated = (riskOrder[currentRisk] ?? 0) > (riskOrder[onboardingRisk] ?? 0);
-  const v = SHORT_TERM_VELOCITY;
-  const industryOutlierPct = Math.max(INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity, INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage);
-  const velocityMultiple = v.historical7DayAvgOutbound > 0 ? v.totalOutboundLast7Days / v.historical7DayAvgOutbound : 0;
-
-  const getTc = (id: string) => config.triggers.find((t) => t.id === id);
-  const rapidTc = getTc("rapid_movement");
-
-  const rawObserved: Record<string, { num?: number; bool?: boolean; category?: string }> = {
-    baseline_deviation: { num: baselineDeviationPct },
-    first_time_beneficiary: { bool: BENEFICIARY_RISK.firstTimeBeneficiary },
-    elevated_risk_jurisdiction: { bool: BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf"), category: BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf") ? "FATF monitored" : "No" },
-    rapid_movement: { num: timeGapHours },
-    documentation_gap: { bool: !STATED_PURPOSE_DOCS.documentationAttached },
-    corridor_novelty: { bool: CORRIDOR_CONTEXT.firstTimeCountry },
-    prior_sar_alert_history: { num: NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled },
-    risk_rating_elevated: { bool: riskRatingElevated },
-    velocity_spike: { num: velocityMultiple },
-    industry_outlier: { num: industryOutlierPct },
-    concentration_risk: { num: EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d, category: EXPOSURE_AGGREGATION.countryConcentrationRisk },
-    negative_media_risk: { bool: INBOUND_COUNTERPARTY.adverseMediaIndicator },
-    sanctions_match: { bool: BENEFICIARY_RISK.sanctionsScreeningResult === "Match" || INBOUND_COUNTERPARTY.sanctionsScreeningResult === "Match", category: BENEFICIARY_RISK.sanctionsScreeningResult === "Match" || INBOUND_COUNTERPARTY.sanctionsScreeningResult === "Match" ? "Match" : "Clear" },
-  };
-
+  const caseData = buildCaseDataForEvaluation(currentAmount);
   const result: PolicyTrigger[] = [];
-  for (const tc of config.triggers) {
-    const unit = tc.thresholdUnit;
-    const op = tc.comparisonOperator ?? "=";
-    const thresholdNum = tc.thresholdValue;
 
-    if (tc.type === "custom" || !tc.enabled) {
+  for (const tc of config.triggers) {
+    if (!tc.enabled) {
       result.push({
-        label: tc.enabled ? tc.label : `${tc.label} (disabled)`,
+        id: tc.id,
+        fieldKey: tc.fieldKey,
+        label: `${tc.name} (disabled)`,
         met: false,
         immediate: false,
-        isCritical: tc.isCritical,
+        isCritical: tc.critical,
         observedValue: "—",
         policyRuleLabel: "—",
         resultLabel: "Not Met",
+        conditionDescription: "—",
       });
       continue;
     }
 
-    const raw = rawObserved[tc.id];
-    if (!raw) {
-      result.push({ label: tc.label, met: false, immediate: false, isCritical: tc.isCritical, observedValue: "—", policyRuleLabel: "—", resultLabel: "Not Met" });
-      continue;
+    const evalResult = evaluateTrigger(
+      { fieldKey: tc.fieldKey, operator: tc.operator, threshold: tc.threshold },
+      caseData
+    );
+    const rawObserved = caseData[tc.fieldKey];
+
+    let label = tc.name;
+    if (tc.fieldKey === "rapidMovementHours" && typeof rawObserved === "number") {
+      label = evalResult.met ? `Rapid movement (${rawObserved}h)` : `Rapid movement (${rawObserved}h) – not triggered`;
     }
 
-    let met: boolean;
-    let observedValue: string;
-    let policyRuleLabel: string;
-
-    if (unit === "boolean" && raw.bool !== undefined && tc.id !== "elevated_risk_jurisdiction" && tc.id !== "sanctions_match") {
-      const observedBool = raw.bool ?? false;
-      const required = thresholdNum === 1;
-      met = observedBool === required;
-      if (tc.id === "documentation_gap") {
-        observedValue = STATED_PURPOSE_DOCS.documentationAttached ? "Attached" : "Missing";
-        policyRuleLabel = "= Missing";
-      } else {
-        observedValue = observedBool ? "Yes" : "No";
-        policyRuleLabel = required ? "= Yes" : "= No";
-      }
-    } else if ((tc.id === "elevated_risk_jurisdiction" || tc.id === "sanctions_match") && raw.category !== undefined) {
-      observedValue = raw.category;
-      const requiredCategory = tc.id === "elevated_risk_jurisdiction" ? "FATF monitored" : "Match";
-      met = observedValue === requiredCategory;
-      policyRuleLabel = `= ${requiredCategory}`;
-    } else {
-      const observedNum = raw.num ?? 0;
-      met = applyNumericComparison(observedNum, op, thresholdNum);
-      if (tc.id === "concentration_risk") {
-        const highRisk = EXPOSURE_AGGREGATION.countryConcentrationRisk === "High";
-        met = met && highRisk;
-        observedValue = `${EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d}%`;
-        const sym = op === ">=" ? "≥" : op === "<=" ? "≤" : op;
-        policyRuleLabel = `${sym}${thresholdNum}% AND jurisdiction_risk = High`;
-      } else if (tc.id === "rapid_movement") {
-        observedValue = `${timeGapHours}h`;
-        policyRuleLabel = `${op === "<=" ? "≤" : op} ${thresholdNum}h`;
-      } else if (tc.id === "velocity_spike") {
-        observedValue = velocityMultiple > 0 ? `${velocityMultiple.toFixed(1)}×` : "—";
-        policyRuleLabel = formatPolicyRule(op, thresholdNum, "multiplier");
-      } else if (tc.id === "industry_outlier") {
-        observedValue = `${industryOutlierPct}th %ile`;
-        policyRuleLabel = formatPolicyRule(op, thresholdNum, "percentile");
-      } else if (tc.id === "baseline_deviation") {
-        observedValue = `${baselineDeviationPct}%`;
-        policyRuleLabel = formatPolicyRule(op, thresholdNum, "percentage");
-      } else if (tc.id === "prior_sar_alert_history") {
-        observedValue = String(NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled);
-        policyRuleLabel = `${op} ${thresholdNum}`;
-      } else {
-        observedValue = String(observedNum);
-        policyRuleLabel = formatPolicyRule(op, thresholdNum, unit);
-      }
-    }
-
-    const immediate = tc.isCritical && tc.id === "rapid_movement" && rapidTc && (raw.num ?? 0) <= (rapidTc.criticalThresholdValue ?? 24) ? true : tc.isCritical ? met : false;
-    let label = tc.label;
-    if (tc.id === "rapid_movement") label = met ? `Rapid movement (${timeGapHours}h)` : `Rapid movement (${timeGapHours}h) – not triggered`;
+    const conditionDescription = getTriggerConditionDescription(
+      tc.fieldKey,
+      tc.operator,
+      tc.threshold,
+      evalResult.observedValue,
+      evalResult.met
+    );
 
     result.push({
+      id: tc.id,
+      fieldKey: tc.fieldKey,
       label,
-      met,
-      immediate,
-      isCritical: tc.isCritical,
-      observedValue,
-      policyRuleLabel,
-      resultLabel: met ? "Met" : "Not Met",
+      met: evalResult.met,
+      immediate: false,
+      isCritical: tc.critical,
+      observedValue: evalResult.observedValue,
+      policyRuleLabel: evalResult.policyRuleLabel,
+      resultLabel: evalResult.resultLabel,
+      conditionDescription,
     });
   }
   return result;
 }
-/** Escalate if triggers met ≥ config.minRegularTriggersToEscalate or any immediate escalation trigger is met. */
+/** Escalate when ≥ N regular triggers met OR any Critical trigger met. */
 function getPolicyEscalationRecommendation(triggers: PolicyTrigger[], config: PolicyConfig): "Escalate" | "Dismiss" {
   const metCount = triggers.filter((t) => t.met).length;
-  const anyImmediate = triggers.some((t) => t.met && t.immediate);
-  return metCount >= config.minRegularTriggersToEscalate || anyImmediate ? "Escalate" : "Dismiss";
+  const anyCriticalMet = triggers.some((t) => t.isCritical && t.met);
+  return metCount >= config.minRegularTriggersToEscalate || anyCriticalMet ? "Escalate" : "Dismiss";
 }
 
 const SAR_QA = {
@@ -720,17 +740,34 @@ type CaseStatus =
   | "Filed"
   | "Override – Manual Review";
 
-/** Locked escalation record after Confirm Escalation; rationale cannot be edited. */
+/** Single version entry in escalation history (for amendments). */
+interface EscalationVersionEntry {
+  versionId: string;
+  timestamp: string;
+  userId: string;
+  amendmentReason: string | null;
+}
+
+/** Locked escalation record after Confirm Escalation; rationale and structured content are read-only. */
 interface EscalationRecord {
+  versionId: string;
+  /** Full structured rationale (for versioning/display). */
   rationale: string;
   userId: string;
   timestamp: string;
-  triggersMet: number;
-  triggersTotal: number;
-  threshold: number;
-  deviationPct: number;
-  timeGapHours: number;
-  triggerSnapshot: { label: string; met: boolean }[];
+  decisionSummary: string;
+  /** Selected primary drivers (analyst may have unchecked some). */
+  primaryRiskDrivers: string[];
+  /** Selected supporting indicators. */
+  supportingIndicators: string[];
+  mitigatingFactors: string[];
+  regulatoryStatement: string;
+  classification: string[];
+  otherClassificationText: string;
+  analystConfidence: "High" | "Moderate" | "Low";
+  outreachRequired: boolean;
+  additionalCommentary: string;
+  versionHistory: EscalationVersionEntry[];
 }
 
 interface CaseStatusTransition {
@@ -746,6 +783,9 @@ const CASE_HEADER = {
   createdDate: "2025-02-14",
   slaCountdown: "2d 4h remaining",
 };
+
+/** Whether current user can create an amendment to a locked escalation record (e.g. supervisor or amendment permission). */
+const HAS_AMENDMENT_PERMISSION = true;
 
 type RelatedCaseOutcome = "Escalated" | "SAR Filed" | "Closed – False Positive";
 
@@ -923,26 +963,6 @@ const TOP_RISK_DRIVERS_DATA: TopRiskDriverItem[] = [
 
 const HIGH_RISK_THRESHOLD = 50;
 
-function BehavioralConsistencyTooltip() {
-  return (
-    <span className="group relative ml-1 inline-flex align-middle" title="Lower scores indicate greater deviation from historical behavior.">
-      <span
-        tabIndex={0}
-        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-neutral-300 text-neutral-600 hover:bg-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-500 focus:ring-offset-1"
-        aria-label="Score scale and meaning"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
-          <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm8.706-1.442c1.146-.573 2.437.463 2.126 1.706l-.709 2.836.042-.02a.75.75 0 011.063 1.06l-.04.041c-.461.46-.544 1.174-.006 1.615a8.5 8.5 0 001.45 1.054.75.75 0 01-.982 1.15 10 10 0 01-1.687-1.265.75.75 0 01-.464-.563l-.002-.008v-.003l-.012-.01a.75.75 0 01.372-.564zm1.544-2.558a.75.75 0 01.75.75v.003a.75.75 0 01-.75.75h-.003a.75.75 0 01-.75-.75V9.25a.75.75 0 01.75-.75h.003z" clipRule="evenodd" />
-        </svg>
-      </span>
-      <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-64 -translate-x-1/2 rounded-lg border border-neutral-200 bg-neutral-900 px-3 py-2 text-xs font-normal text-white shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100" role="tooltip">
-        Lower scores indicate greater deviation from historical behavior. Scale: 0 = highly inconsistent, 100 = fully consistent.
-        <span className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-neutral-900" />
-      </span>
-    </span>
-  );
-}
-
 function RiskScoreTooltip({ score }: { score: number }) {
   return (
     <span className="group relative ml-1 inline-flex align-middle">
@@ -1066,6 +1086,14 @@ export default function Home() {
   const [escalationModalOpen, setEscalationModalOpen] = useState(false);
   const [escalationRationaleDraft, setEscalationRationaleDraft] = useState("");
   const [escalationRecord, setEscalationRecord] = useState<EscalationRecord | null>(null);
+  const [analystConfidence, setAnalystConfidence] = useState<"High" | "Moderate" | "Low" | null>(null);
+  const [outreachRequired, setOutreachRequired] = useState(false);
+  const [decisionSummaryDraft, setDecisionSummaryDraft] = useState("");
+  const [additionalCommentary, setAdditionalCommentary] = useState("");
+  const [selectedSupportingIndices, setSelectedSupportingIndices] = useState<number[]>([]);
+  const [amendmentModalOpen, setAmendmentModalOpen] = useState(false);
+  const [amendmentReason, setAmendmentReason] = useState("");
+  const [viewEscalationModalOpen, setViewEscalationModalOpen] = useState(false);
   const [caseStatusTransitionHistory, setCaseStatusTransitionHistory] = useState<CaseStatusTransition[]>([]);
   const [policyConfig, setPolicyConfig] = useState<PolicyConfig>(getDefaultPolicyConfig());
 
@@ -1303,86 +1331,257 @@ export default function Home() {
     const removesFromQueue = newStatus === "Escalated" || newStatus === "Dismissed";
   };
 
-  const getDefaultEscalationRationale = (): string => {
-    const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
-    const met = triggers.filter((t) => t.met).length;
-    const total = triggers.length;
-    const threshold = policyConfig.minRegularTriggersToEscalate;
-    const deviationPct = selectedAlert
-      ? getBaselineDeviationPct(parseAmount(selectedAlert.amount))
-      : 0;
+  /** Build structured escalation content from current case data (for modal and record). */
+  const getEscalationStructuredContent = () => {
     const timeGap = SOURCE_OF_FUNDS.timeGapHours;
     const country = selectedAlert?.counterpartyCountry ?? "Cyprus";
     const beneficiaryLabel = "Mediterranean Trade Partners";
-    return `Escalation Rationale:
+    const currentAmount = selectedAlert ? parseAmount(selectedAlert.amount) : 0;
+    const deviationPct = selectedAlert ? getBaselineDeviationPct(currentAmount) : 0;
+    const avg90 = BASELINE_VERIFICATION.avgOutboundWire90d;
+    const deviationMultiple = avg90 > 0 && currentAmount > 0 ? Math.round((currentAmount / avg90) * 10) / 10 : 0;
+    const prior6MonthMax = HISTORICAL_OUTBOUND_MONTHS.length > 0 ? Math.max(...HISTORICAL_OUTBOUND_MONTHS.map((m) => m.largestSingle)) : 0;
+    const velocityMultiple = SHORT_TERM_VELOCITY.historical7DayAvgOutbound > 0
+      ? (SHORT_TERM_VELOCITY.totalOutboundLast7Days / SHORT_TERM_VELOCITY.historical7DayAvgOutbound) : 0;
+    const riskOrder = { Low: 0, Medium: 1, High: 2 } as const;
+    const currentRisk = (CUSTOMER_RISK_DRIFT.currentInternalRiskRating as keyof typeof riskOrder) || "Low";
+    const onboardingRisk = (CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding as keyof typeof riskOrder) || "Low";
+    const ratingElevated = (riskOrder[currentRisk] ?? 0) > (riskOrder[onboardingRisk] ?? 0);
+    const jurisdictionLabel = BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf")
+      ? `${country} (FATF-monitored jurisdiction)` : country;
 
-This alert meets internal AML escalation criteria.
+    /** Paragraph 1 — Transaction facts (clean prose, no section label) */
+    const amountFormatted = currentAmount > 0 ? `$${currentAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : selectedAlert?.amount ?? "—";
+    let para1 = `Outbound wire of ${amountFormatted} to ${jurisdictionLabel}`;
+    if (avg90 > 0 && currentAmount > 0) {
+      para1 += ` represents a ${deviationMultiple}× increase over the 90-day average ($${avg90.toLocaleString()})`;
+      if (prior6MonthMax > 0 && currentAmount > prior6MonthMax) {
+        para1 += ` and exceeds the prior six-month maximum of $${prior6MonthMax.toLocaleString()}`;
+      }
+      para1 += ".";
+    } else {
+      para1 += ".";
+    }
+    if (timeGap > 0 && SOURCE_OF_FUNDS.largestInboundWithin7Days > 0) {
+      para1 += ` Funds were transferred ${timeGap} hours after receipt of $${SOURCE_OF_FUNDS.largestInboundWithin7Days.toLocaleString()} inbound, indicating rapid movement.`;
+    } else if (timeGap > 0) {
+      para1 += ` Funds were transferred ${timeGap} hours after inbound receipt.`;
+    }
 
-Triggers met: ${met} of ${total} (threshold: ${threshold}).
+    /** Paragraph 2 — Primary risk drivers only (4–6), severity-ranked, no trigger dump. Secondary woven in. */
+    const hasRapid = timeGap > 0 && timeGap <= 72;
+    const hasFirstTimeBeneficiary = BENEFICIARY_RISK.firstTimeBeneficiary;
+    const hasFirstTimeCountry = CORRIDOR_CONTEXT.firstTimeCountry;
+    const hasElevatedJurisdiction = BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf") || BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("elevated");
+    const hasDocGap = !STATED_PURPOSE_DOCS.documentationAttached;
+    const hasMaterialDeviation = (avg90 > 0 && currentAmount > 0 && (deviationMultiple >= 1.5 || Math.abs(deviationPct) >= 50));
+    const hasPriorSar = CUSTOMER_RISK_DRIFT.priorSarFilings || CUSTOMER_RISK_DRIFT.priorSarCount > 0 || CUSTOMER_RISK_DRIFT.alertsLast90Days > 0;
+    const concentrationPct = EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d;
+    const hasConcentration = concentrationPct >= 50;
+    const priorDocTotal = STATED_PURPOSE_DOCS.priorTradeWiresTotal;
 
-Key escalation drivers:
-• First-time beneficiary (${beneficiaryLabel} – ${country}, FATF monitored).
-• Elevated-risk jurisdiction exposure.
-• ${deviationPct}% deviation from 90-day outbound baseline.
-• Rapid movement of funds (${timeGap} hours between inbound and outbound).
-• No supporting documentation for stated trade settlement.
-• Corridor novelty (no prior transactions to ${country}).
+    const driverParts: string[] = [];
+    if (hasFirstTimeBeneficiary && hasFirstTimeCountry) {
+      driverParts.push("The beneficiary is a first-time counterparty and first-time country exposure");
+    } else if (hasFirstTimeBeneficiary) {
+      driverParts.push("The beneficiary is a first-time counterparty");
+    } else if (hasFirstTimeCountry) {
+      driverParts.push(`First-time country exposure (no prior transactions to ${country})`);
+    }
+    if (hasDocGap) {
+      driverParts.push(driverParts.length > 0 ? "supporting documentation for the stated trade purpose has not been provided" : "Supporting documentation for the stated trade purpose has not been provided");
+    }
+    if (hasConcentration && concentrationPct > 0) {
+      driverParts.push(driverParts.length > 0 ? `in addition, ${concentrationPct}% of recent outbound volume is directed to this high-risk jurisdiction` : `${concentrationPct}% of recent outbound volume is directed to this high-risk jurisdiction`);
+    }
+    if (ratingElevated) {
+      driverParts.push(driverParts.length > 0 ? `and the customer's risk rating has recently elevated from ${CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding} to ${CUSTOMER_RISK_DRIFT.currentInternalRiskRating}` : `The customer's risk rating has recently elevated from ${CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding} to ${CUSTOMER_RISK_DRIFT.currentInternalRiskRating}`);
+    }
+    if (hasPriorSar) {
+      const sarText = CUSTOMER_RISK_DRIFT.priorSarCount > 0 && CUSTOMER_RISK_DRIFT.alertsLast90Days > 0
+        ? `with ${CUSTOMER_RISK_DRIFT.priorSarCount} prior SAR filing(s) and ${CUSTOMER_RISK_DRIFT.alertsLast90Days} alerts in the last 90 days`
+        : CUSTOMER_RISK_DRIFT.priorSarCount > 0
+          ? `with ${CUSTOMER_RISK_DRIFT.priorSarCount} prior SAR filing(s)`
+          : `with ${CUSTOMER_RISK_DRIFT.alertsLast90Days} alerts in the last 90 days`;
+      driverParts.push(driverParts.length > 0 ? sarText : `Prior SAR history: ${sarText}`);
+    }
+    if (hasMaterialDeviation && !driverParts.some((p) => p.toLowerCase().includes("90-day") || p.toLowerCase().includes("average") || p.toLowerCase().includes("deviation"))) {
+      driverParts.push(driverParts.length > 0 ? `material deviation from historical activity (${deviationMultiple}× the 90-day average)` : `Transaction represents material deviation from historical activity (${deviationMultiple}× the 90-day average)`);
+    }
+    if (velocityMultiple >= 1.5 && velocityMultiple < 4 && !driverParts.some((p) => p.toLowerCase().includes("velocity"))) {
+      driverParts.push(driverParts.length > 0 ? `7-day velocity is ${velocityMultiple.toFixed(1)}× historical average` : `7-day velocity is ${velocityMultiple.toFixed(1)}× historical average`);
+    }
 
-The activity is inconsistent with the customer's historical behavior and declared business profile. Escalation to Investigation is required under internal AML policy.`;
+    const para2Raw = driverParts.length > 0
+      ? driverParts.map((p) => p.trim()).join(". ").replace(/\.\s+([a-z])/g, (_, c) => ". " + c.toUpperCase())
+      : "Risk indicators have been identified that indicate elevated transaction risk requiring enhanced review.";
+    const para2 = para2Raw.endsWith(".") ? para2Raw : para2Raw + ".";
+
+    /** Paragraph 3 — Escalation justification: mitigating factors acknowledged, then outweigh, then policy. */
+    const mitigatingAck: string[] = [];
+    if (BENEFICIARY_RISK.sanctionsScreeningResult === "Clear") mitigatingAck.push("no sanctions or adverse media were identified");
+    if (priorDocTotal > 0) mitigatingAck.push("prior trade activity exists");
+    const mitigatingPhrase = mitigatingAck.length > 0 ? `While ${mitigatingAck.join(" and ")}, ` : "";
+    const keyFactorsList: string[] = [];
+    if (hasRapid) keyFactorsList.push("rapid fund movement");
+    if (hasElevatedJurisdiction || hasFirstTimeBeneficiary || hasFirstTimeCountry) keyFactorsList.push("elevated jurisdiction exposure");
+    if (hasMaterialDeviation) keyFactorsList.push("material deviation from historical activity");
+    if (hasDocGap) keyFactorsList.push("documentation gap");
+    if (hasPriorSar) keyFactorsList.push("prior SAR history");
+    const keyFactorsPhrase = keyFactorsList.length > 0 ? keyFactorsList.join(", ") : "these risk indicators";
+    const para3 = `${mitigatingPhrase}the combination of ${keyFactorsPhrase} outweigh mitigating factors. Escalation to Level 2 Investigation is warranted under internal AML policy.`;
+
+    const decisionSummary = [para1, "", para2, "", para3].join("\n");
+
+    const primaryRiskDrivers: string[] = [];
+    if (timeGap <= 72) primaryRiskDrivers.push(`Rapid movement of funds (${timeGap}-hour gap between inbound and outbound)`);
+    if (BENEFICIARY_RISK.firstTimeBeneficiary && BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf")) {
+      primaryRiskDrivers.push(`First-time beneficiary in FATF-monitored jurisdiction (${beneficiaryLabel}, ${country})`);
+    }
+    if (Math.abs(deviationPct) >= 50) {
+      primaryRiskDrivers.push(`Material deviation from historical baseline (${deviationPct > 0 ? "+" : ""}${deviationPct}% vs 90-day average)`);
+    }
+    if (!STATED_PURPOSE_DOCS.documentationAttached) {
+      primaryRiskDrivers.push("Missing documentation for stated trade purpose");
+    }
+    if (NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled > 0) {
+      primaryRiskDrivers.push(`Prior SAR or alert history (${NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled} prior alerts escalated or SAR filed for this beneficiary)`);
+    }
+    if (CORRIDOR_CONTEXT.firstTimeCountry) {
+      primaryRiskDrivers.push(`First-time country exposure (no prior transactions to ${country})`);
+    }
+    const primary = primaryRiskDrivers.slice(0, 6);
+
+    const supportingIndicators: string[] = [];
+    if (velocityMultiple >= 1.5) supportingIndicators.push(`7-day velocity spike (${velocityMultiple.toFixed(1)}× normal)`);
+    if (EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d >= 50) {
+      supportingIndicators.push(`Concentration of outbound volume (${EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d}% to high-risk jurisdiction)`);
+    }
+    if (ratingElevated) supportingIndicators.push("Recent risk rating elevation");
+
+    const mitigatingFactors: string[] = [];
+    if (BENEFICIARY_RISK.sanctionsScreeningResult === "Clear") mitigatingFactors.push("No sanctions match identified");
+    if (!INBOUND_COUNTERPARTY.adverseMediaIndicator) mitigatingFactors.push("No adverse media identified");
+    mitigatingFactors.push("Customer industry consistent with international trade");
+    mitigatingFactors.push("Account age: 18 months");
+    if (STATED_PURPOSE_DOCS.priorTradeWiresTotal > 0) {
+      mitigatingFactors.push(`Prior documented trade wires exist (${STATED_PURPOSE_DOCS.priorTradeWiresWithDocumentationCount} of ${STATED_PURPOSE_DOCS.priorTradeWiresTotal})`);
+    }
+
+    const regulatoryStatement = "Based on the available transactional, customer, and counterparty data, escalation to Level 2 Investigation is required in accordance with internal AML policy.";
+
+    return { decisionSummary, primaryRiskDrivers: primary, supportingIndicators, mitigatingFactors, regulatoryStatement };
   };
 
   const handleEscalateClick = () => {
-    setEscalationRationaleDraft(getDefaultEscalationRationale());
+    const content = getEscalationStructuredContent();
+    setDecisionSummaryDraft(content.decisionSummary);
+    setAdditionalCommentary("");
+    setSelectedSupportingIndices(content.supportingIndicators.map((_, i) => i));
+    setAnalystConfidence(null);
+    setOutreachRequired(false);
+    setEscalationRationaleDraft("");
     setEscalationModalOpen(true);
   };
 
+  /** Validate escalation summary: at least 3 numeric refs, 1 jurisdiction ref, 1 historical comparison ref, and explicit rationale. */
+  const validateDecisionSummary = (summary: string): { valid: boolean; message?: string } => {
+    const s = summary.trim();
+    if (s.length === 0) return { valid: false, message: "Summary is required." };
+    const numericMatches = s.match(/\d+(\.\d+)?%?/g) ?? [];
+    const numericCount = numericMatches.length;
+    if (numericCount < 3) return { valid: false, message: `Summary must include at least 3 numeric references (e.g. amount, %, count). Found ${numericCount}.` };
+    const hasJurisdiction = /\b(jurisdiction|country|Cyprus|FATF|high-risk|counterparty)\b/i.test(s);
+    if (!hasJurisdiction) return { valid: false, message: "Summary must include at least one jurisdiction or counterparty reference." };
+    const hasHistoricalComparison = /\b(90-day|6-month|six-month|prior|average|historical|baseline|maximum)\b/i.test(s);
+    if (!hasHistoricalComparison) return { valid: false, message: "Summary must include at least one historical comparison (e.g. 90-day average, prior maximum)." };
+    const hasRationale = /\b(escalation|warranted|Level 2|policy|AML|outweigh)\b/i.test(s);
+    if (!hasRationale) return { valid: false, message: "Summary must include explicit escalation rationale (e.g. escalation warranted under policy)." };
+    return { valid: true };
+  };
+
   const handleEscalateConfirm = () => {
-    const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
-    const met = triggers.filter((t) => t.met).length;
-    const total = triggers.length;
-    const threshold = policyConfig.minRegularTriggersToEscalate;
-    const deviationPct = selectedAlert
-      ? getBaselineDeviationPct(parseAmount(selectedAlert.amount))
-      : 0;
-    const timeGap = SOURCE_OF_FUNDS.timeGapHours;
+    const content = getEscalationStructuredContent();
+    const summaryTrimmed = decisionSummaryDraft.trim();
+    const summaryValidation = validateDecisionSummary(summaryTrimmed);
+    if (!summaryValidation.valid) return;
+    if (!analystConfidence) return;
     const ts = formatTimestamp();
     const userId = CASE_HEADER.assignedAnalyst;
+    const selectedSupportingIndicators = selectedSupportingIndices
+      .filter((i) => i >= 0 && i < content.supportingIndicators.length)
+      .map((i) => content.supportingIndicators[i]);
+    const rationaleParts = [
+      "Escalation Decision Summary",
+      summaryTrimmed,
+      "",
+      "Additional Analyst Commentary",
+      additionalCommentary.trim() || "(none)",
+      "",
+      "Analyst Confidence",
+      analystConfidence,
+      "",
+      "Regulatory Statement",
+      content.regulatoryStatement,
+    ].filter(Boolean);
 
+    const versionId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `v-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const record: EscalationRecord = {
-      rationale: escalationRationaleDraft,
+      versionId,
+      rationale: rationaleParts.join("\n"),
       userId,
       timestamp: ts,
-      triggersMet: met,
-      triggersTotal: total,
-      threshold,
-      deviationPct,
-      timeGapHours: timeGap,
-      triggerSnapshot: triggers.map((t) => ({ label: t.label, met: t.met })),
+      decisionSummary: summaryTrimmed,
+      primaryRiskDrivers: [],
+      supportingIndicators: selectedSupportingIndicators,
+      mitigatingFactors: content.mitigatingFactors,
+      regulatoryStatement: content.regulatoryStatement,
+      classification: [],
+      otherClassificationText: "",
+      analystConfidence,
+      outreachRequired,
+      additionalCommentary: additionalCommentary.trim(),
+      versionHistory: [],
     };
     setEscalationRecord(record);
-    setCaseStatusTransitionHistory((prev) => [
-      ...prev,
-      { from: caseStatus, to: "Under Investigation", timestamp: ts, userId },
-    ]);
+    setCaseStatusTransitionHistory((prev) => [...prev, { from: caseStatus, to: "Under Investigation", timestamp: ts, userId }]);
     setCaseStatus("Under Investigation");
     if (selectedAlertId) applyAlertStatus(selectedAlertId, "Escalated");
-    setDecisionAuditLog((prev) => [
-      ...prev,
-      {
-        user: userId,
-        timestamp: ts,
-        action: "Escalated",
-        delta: `${met}/${total} policy triggers met. Case moved to Investigation.`,
-      },
-    ]);
-    setDecisionLog((prev) => [
-      ...prev,
-      `Escalated by ${userId} – ${ts} – Initial Escalation Record created.`,
-    ]);
+    setDecisionAuditLog((prev) => [...prev, { user: userId, timestamp: ts, action: "Escalated", delta: "Escalation rationale recorded. Case moved to Investigation." }]);
+    setDecisionLog((prev) => [...prev, `Escalated by ${userId} – ${ts} – Initial Escalation Record created (version ${versionId.slice(0, 8)}).`]);
     setDecisionTaken(true);
     setEscalationModalOpen(false);
     setEscalationRationaleDraft("");
+    setDecisionSummaryDraft("");
+    setAdditionalCommentary("");
+    setSelectedSupportingIndices([]);
+    setAnalystConfidence(null);
+    setOutreachRequired(false);
     setToast({ show: true, message: "Case escalated. Status: Under Investigation. Assigned to Investigation queue." });
+  };
+
+  const handleAmendmentConfirm = () => {
+    if (!escalationRecord || !amendmentReason.trim()) return;
+    const ts = formatTimestamp();
+    const userId = CASE_HEADER.assignedAnalyst;
+    const newVersionId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `v-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const newHistory: EscalationVersionEntry[] = [
+      ...escalationRecord.versionHistory,
+      { versionId: escalationRecord.versionId, timestamp: escalationRecord.timestamp, userId: escalationRecord.userId, amendmentReason: amendmentReason.trim() },
+    ];
+    const updated: EscalationRecord = {
+      ...escalationRecord,
+      versionId: newVersionId,
+      timestamp: ts,
+      userId,
+      versionHistory: newHistory,
+    };
+    setEscalationRecord(updated);
+    setAmendmentModalOpen(false);
+    setAmendmentReason("");
+    setDecisionAuditLog((prev) => [...prev, { user: userId, timestamp: ts, action: "Escalation amended", delta: `New version ${newVersionId.slice(0, 8)}. Reason: ${amendmentReason.trim()}` }]);
+    setDecisionLog((prev) => [...prev, `Escalation record amended by ${userId} – ${ts} – Version ${newVersionId.slice(0, 8)}.`]);
+    setToast({ show: true, message: "Escalation record amended. New version created." });
   };
 
   const handleDismiss = () => {
@@ -1435,7 +1634,8 @@ The activity is inconsistent with the customer's historical behavior and declare
       {/* KPI summary row */}
       <div className="shrink-0 border-b border-neutral-200 bg-neutral-100 px-8 py-4">
         {(() => {
-          const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
+          const currentAmt = selectedAlert ? parseAmount(selectedAlert.amount) : undefined;
+          const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmt, policyConfig);
           const escalationLikely = triggers.filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate;
           const escalationRecommendedCount = escalationLikely ? totalAlerts : 0;
           const dismissalRecommendedCount = escalationLikely ? 0 : totalAlerts;
@@ -1538,7 +1738,8 @@ The activity is inconsistent with the customer's historical behavior and declare
 
         <ul className="flex-1 overflow-y-auto p-3">
           {(() => {
-            const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
+            const currentAmt = selectedAlert ? parseAmount(selectedAlert.amount) : undefined;
+            const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmt, policyConfig);
             const escalationLikely = triggers.filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate;
             const filteredAlerts = ALERTS.filter((alert) => {
               const matchRecommendation =
@@ -1703,7 +1904,8 @@ The activity is inconsistent with the customer's historical behavior and declare
                 {/* ESCALATION STATUS — within card; buttons on same row */}
                 {(() => {
                   const evaluatedAt = new Date();
-                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
+                  const currentAmount = selectedAlert ? parseAmount(selectedAlert.amount) : undefined;
+                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmount, policyConfig);
                   const criticalTriggers = triggers.filter((t) => t.isCritical);
                   const regularTriggers = triggers.filter((t) => !t.isCritical);
                   const metCount = triggers.filter((t) => t.met).length;
@@ -1725,7 +1927,7 @@ The activity is inconsistent with the customer's historical behavior and declare
                         {list.map((t, i) => (
                           <tr key={i} className="border-b border-neutral-100 align-baseline">
                             <td className="w-8 shrink-0 py-1.5 pr-2">
-                              {t.met ? <span className="text-red-600" aria-label="Met">✔</span> : <span className="text-neutral-400" aria-label="Not met">✖</span>}
+                              {t.met ? <span className="text-red-600" aria-label="Met">✔</span> : <span className="text-neutral-400" aria-label="Not Met">✖</span>}
                             </td>
                             <td className="min-w-0 py-1.5 px-2 font-bold text-neutral-900 truncate sm:min-w-[120px]" title={t.label}>
                               {t.label}
@@ -1882,438 +2084,93 @@ The activity is inconsistent with the customer's historical behavior and declare
                   </div>
                 </section>
 
-                {/* Customer Risk Drift & Alert History — below Subject & Recipient Profile, above Baseline & Beneficiary Verification */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Customer Risk Drift &amp; Alert History
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Risk rating at onboarding</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding}</dd></div>
-                    <div><dt className="text-neutral-500">Current internal risk rating</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.currentInternalRiskRating}</dd></div>
-                    <div><dt className="text-neutral-500">Number of alerts in last 90 days</dt><dd className="font-medium text-neutral-900 tabular-nums">{CUSTOMER_RISK_DRIFT.alertsLast90Days}</dd></div>
-                    <div><dt className="text-neutral-500">Number of alerts in last 12 months</dt><dd className="font-medium text-neutral-900 tabular-nums">{CUSTOMER_RISK_DRIFT.alertsLast12Months}</dd></div>
-                    <div><dt className="text-neutral-500">Prior SAR filings</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.priorSarFilings ? `Yes (${CUSTOMER_RISK_DRIFT.priorSarCount})` : "No"}</dd></div>
-                    <div><dt className="text-neutral-500">Alert frequency trend indicator</dt><dd className="font-medium text-neutral-900">{CUSTOMER_RISK_DRIFT.alertFrequencyTrend}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    This alert occurs within a pattern of {CUSTOMER_RISK_DRIFT.alertsLast90Days} alerts in the last 90 days.
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-700">
-                    Customer risk posture appears {CUSTOMER_RISK_DRIFT.alertFrequencyTrend}.
-                  </p>
-                  {(() => {
-                    const riskOrder = { Low: 0, Medium: 1, High: 2 } as const;
-                    const current = (CUSTOMER_RISK_DRIFT.currentInternalRiskRating as keyof typeof riskOrder) || "Low";
-                    const onboarding = (CUSTOMER_RISK_DRIFT.riskRatingAtOnboarding as keyof typeof riskOrder) || "Low";
-                    const ratingIncreased = (riskOrder[current] ?? 0) > (riskOrder[onboarding] ?? 0);
-                    return ratingIncreased ? (
-                      <p className="mt-2 text-sm font-medium text-red-700">
-                        Trigger: Risk Rating Elevated — set (customer&apos;s risk rating has increased recently).
-                      </p>
-                    ) : null;
-                  })()}
-                </section>
-
-                {/* Baseline & Beneficiary Verification — below Customer Risk Drift */}
+                {/* Transaction Deviation Analysis */}
                 {selectedAlert && (() => {
                   const currentAmount = parseAmount(selectedAlert.amount);
                   const avg90 = BASELINE_VERIFICATION.avgOutboundWire90d;
-                  const maxPrior = BASELINE_VERIFICATION.largestPriorWire90d;
-                  const pctVsAvg = getBaselineDeviationPct(currentAmount);
-                  const pctVsMax = maxPrior > 0 ? Math.round(((currentAmount - maxPrior) / maxPrior) * 100) : 0;
+                  // Multiple: Current ÷ 90-Day Average (used for display and trigger)
+                  const multipleVsAvg = avg90 > 0 ? currentAmount / avg90 : 0;
+                  const triggerMet = avg90 > 0 && multipleVsAvg >= 2.0;
+                  const prior6moMax = Math.max(...HISTORICAL_OUTBOUND_MONTHS.map((m) => m.largestSingle));
                   return (
                     <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
                       <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Baseline &amp; Beneficiary Verification
+                        Transaction Deviation Analysis
                       </h3>
                       <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div><dt className="text-neutral-500">90-day average outbound wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">${avg90.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Largest prior single outbound wire (90 days)</dt><dd className="font-medium text-neutral-900 tabular-nums">${maxPrior.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Current wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
-                        <div><dt className="text-neutral-500">% increase vs 90-day average</dt><dd className="font-medium text-neutral-900 tabular-nums">{pctVsAvg > 0 ? "+" : ""}{pctVsAvg}%</dd></div>
-                        <div><dt className="text-neutral-500">% increase vs largest prior transaction</dt><dd className="font-medium text-neutral-900 tabular-nums">{pctVsMax > 0 ? "+" : ""}{pctVsMax}%</dd></div>
-                        <div><dt className="text-neutral-500">First-time beneficiary confirmation</dt><dd className="font-medium text-neutral-900">{BASELINE_VERIFICATION.firstTimeBeneficiary ? "Yes" : "No"}</dd></div>
-                        <div className="sm:col-span-2"><dt className="text-neutral-500">Date of last transaction with this beneficiary</dt><dd className="font-medium text-neutral-900">{BASELINE_VERIFICATION.lastTransactionWithBeneficiary ?? "—"}</dd></div>
+                        <div><dt className="text-neutral-500">Current Transaction Amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
+                        <div><dt className="text-neutral-500">90-Day Average Outbound Amount</dt><dd className="font-medium text-neutral-900 tabular-nums">${avg90.toLocaleString()}</dd></div>
+                        <div><dt className="text-neutral-500">Transaction Multiple vs 90-Day Average</dt><dd className="font-medium text-neutral-900 tabular-nums">{multipleVsAvg.toFixed(1)}×</dd></div>
+                        <div><dt className="text-neutral-500">Prior 6-Month Maximum Transaction</dt><dd className="font-medium text-neutral-900 tabular-nums">${prior6moMax.toLocaleString()}</dd></div>
                       </dl>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        Current wire exceeds 90-day average by {pctVsAvg > 0 ? "+" : ""}{pctVsAvg}% and prior single-transaction maximum by {pctVsMax > 0 ? "+" : ""}{pctVsMax}%.
-                      </p>
-                      {pctVsAvg > 100 ? (
-                        <p className="mt-2 text-sm font-medium text-red-700">
-                          Trigger: Baseline Deviation — set (current transaction &gt;200% of 90-day average).
-                        </p>
-                      ) : null}
+                      <div className="mt-3 border-t border-neutral-100 pt-3">
+                        {triggerMet ? (
+                          <p className="mt-0 text-sm font-medium text-red-700">
+                            Trigger: Baseline Deviation — Met (current transaction ≥ 2.0× 90-day average).
+                          </p>
+                        ) : null}
+                      </div>
                     </section>
                   );
                 })()}
 
-                {/* Business Capacity & Corridor Context — below Subject & Recipient Profile. Revenue % from same-period comparisons only. */}
-                {selectedAlert && (() => {
-                  const declaredMonthlyRevenue = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue;
-                  const currentWireAmount = parseAmount(selectedAlert.amount);
-                  const outbound90d = BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow;
-                  const declared90dRevenue = declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
-                  const wirePctOfMonthlyRevenue = declaredMonthlyRevenue > 0 ? Math.round((currentWireAmount / declaredMonthlyRevenue) * 100) : 0;
-                  const outbound90dPctOfDeclared90d = declared90dRevenue > 0 ? Math.round((outbound90d / declared90dRevenue) * 100) : 0;
-                  const firstTimeCountry = CORRIDOR_CONTEXT.firstTimeCountry;
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Business Capacity &amp; Corridor Context
-                      </h3>
-                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div><dt className="text-neutral-500">Declared monthly revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">${declaredMonthlyRevenue.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Current wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
-                        <div><dt className="text-neutral-500">Wire vs monthly revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">{wirePctOfMonthlyRevenue}%</dd></div>
-                        <div><dt className="text-neutral-500">90-day outbound total</dt><dd className="font-medium text-neutral-900 tabular-nums">${outbound90d.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">90-day declared revenue (3 × monthly)</dt><dd className="font-medium text-neutral-900 tabular-nums">${declared90dRevenue.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">90-day outbound vs 90-day declared revenue</dt><dd className="font-medium text-neutral-900 tabular-nums">{outbound90dPctOfDeclared90d}%</dd></div>
-                        <div><dt className="text-neutral-500">Indicator: First-time country</dt><dd className="font-medium text-neutral-900">{firstTimeCountry ? "Yes" : "No"}</dd></div>
-                        <div className="sm:col-span-2"><dt className="text-neutral-500">Countries used in last 12 months</dt><dd className="font-medium text-neutral-900">{CORRIDOR_CONTEXT.countriesLast12Months.length ? CORRIDOR_CONTEXT.countriesLast12Months.join(", ") : "—"}</dd></div>
-                      </dl>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        Wire vs monthly revenue: {wirePctOfMonthlyRevenue}%. 90-day outbound vs 90-day declared revenue: {outbound90dPctOfDeclared90d}%.
-                      </p>
-                      <p className="mt-1 text-sm text-neutral-700">
-                        This destination has{firstTimeCountry ? " not" : ""} been used previously.
-                      </p>
-                      {BENEFICIARY_RISK.jurisdictionRiskTier.toLowerCase().includes("fatf") ? (
-                        <p className="mt-2 text-sm font-medium text-red-700">
-                          Trigger: Elevated-Risk Jurisdiction — set (country on FATF high-risk list).
-                        </p>
-                      ) : null}
-                    </section>
+                {/* Registry-driven alert detail cards (single source of truth with policy field picker) */}
+                {(() => {
+                  /** Map trigger fieldKey (including backward-compat aliases) to registry field key so triggers show on the correct card. */
+                  const triggerFieldKeyToRegistryKey: Record<string, string> = {
+                    rapidMovementHours: "timeGapHours",
+                    velocity7dMultiple: "spikeMultiple7d",
+                    documentationGap: "documentationGapPresent",
+                    corridorNovelty: "firstTimeCountry",
+                    concentrationPercent: "pctOutboundVolumeJurisdiction90d",
+                    negativeMediaRisk: "adverseMediaIndicator",
+                  };
+                  const caseData = buildCaseDataForEvaluation(selectedAlert ? parseAmount(selectedAlert.amount) : undefined);
+                  const policyTriggers = getPolicyEscalationTriggers(
+                    SOURCE_OF_FUNDS.timeGapHours,
+                    selectedAlert ? parseAmount(selectedAlert.amount) : undefined,
+                    policyConfig
                   );
-                })()}
-
-                {/* Industry Peer Benchmark Comparison — below Business Capacity & Corridor Context */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Industry Peer Benchmark Comparison
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Average outbound as % of revenue for similar NAICS industry</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.avgOutboundPctOfRevenueSimilarNAICS}%</dd></div>
-                    <div><dt className="text-neutral-500">Average international wire frequency for peer cohort</dt><dd className="font-medium text-neutral-900">{INDUSTRY_PEER_BENCHMARK.avgInternationalWireFreqPeerCohort}</dd></div>
-                    <div><dt className="text-neutral-500">Peer percentile ranking for this customer&apos;s outbound activity</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity}{["th", "st", "nd", "rd"][((INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity % 100) - 20) % 10] ?? "th"}</dd></div>
-                    <div><dt className="text-neutral-500">Peer percentile ranking for corridor usage</dt><dd className="font-medium text-neutral-900 tabular-nums">{INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage}{["th", "st", "nd", "rd"][((INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage % 100) - 20) % 10] ?? "th"}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    Customer outbound activity ranks in the {INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity}{(() => { const n = INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity; const ord = ["th", "st", "nd", "rd"][((n % 100) - 20) % 10] ?? "th"; return ord; })()} percentile compared to industry peers.
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-700">
-                    Industry deviation severity: {INDUSTRY_PEER_BENCHMARK.industryDeviationSeverity}.
-                  </p>
-                  {(INDUSTRY_PEER_BENCHMARK.peerPercentileOutboundActivity >= 90 || INDUSTRY_PEER_BENCHMARK.peerPercentileCorridorUsage >= 90) ? (
-                    <p className="mt-2 text-sm font-medium text-red-700">
-                      Trigger: Industry Outlier — set (outbound frequency or volume ranks above 90th percentile).
-                    </p>
-                  ) : null}
-                </section>
-
-                {/* Historical Outbound Trend — below Business Capacity & Corridor Context */}
-                {selectedAlert && (() => {
-                  const currentWire = parseAmount(selectedAlert.amount);
-                  const months = HISTORICAL_OUTBOUND_MONTHS;
-                  const historicalMax = Math.max(...months.map((m) => m.largestSingle));
-                  const monthsWhereCurrentIsHighest = months.filter((m) => currentWire > m.largestSingle).length;
-                  const currentIsHighestInWindow = currentWire > historicalMax;
-                  const xMonths = currentIsHighestInWindow ? months.length : monthsWhereCurrentIsHighest;
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Historical Outbound Trend
-                      </h3>
-                      <div className="mt-3 overflow-hidden rounded border border-neutral-200">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="border-b border-neutral-200 bg-neutral-50">
-                              <th className="px-3 py-2 text-left font-medium text-neutral-600">Month</th>
-                              <th className="px-3 py-2 text-right font-medium text-neutral-600">Monthly total</th>
-                              <th className="px-3 py-2 text-right font-medium text-neutral-600">Largest single</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {months.map((m, i) => (
-                              <tr key={i} className="border-b border-neutral-100 last:border-0">
-                                <td className="px-3 py-2 text-neutral-700">{m.month}</td>
-                                <td className="px-3 py-2 text-right font-medium tabular-nums text-neutral-800">${m.total.toLocaleString()}</td>
-                                <td className="px-3 py-2 text-right font-medium tabular-nums text-neutral-800">${m.largestSingle.toLocaleString()}</td>
-                              </tr>
+                  return getCards().map((card) => {
+                    const cardFieldKeys = new Set(card.fields.map((f) => f.key));
+                    const triggersForCard = policyTriggers.filter((t) => {
+                      const registryKey = triggerFieldKeyToRegistryKey[t.fieldKey] ?? t.fieldKey;
+                      return cardFieldKeys.has(registryKey);
+                    });
+                    return (
+                      <section key={card.cardId} className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                          {card.cardTitle}
+                        </h3>
+                        <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                          {card.fields.map((field) => (
+                            <div key={field.key}>
+                              <dt className="text-neutral-500">{field.label}</dt>
+                              <dd className="font-medium text-neutral-900 tabular-nums">
+                                {field.key === "priorDocumentedTradeWiresCount"
+                                  ? `${formatCaseValue(caseData[field.key], field)} of ${caseData["priorTradeWiresTotal"] != null ? Number(caseData["priorTradeWiresTotal"]).toLocaleString() : "—"}`
+                                  : formatCaseValue(caseData[field.key], field)}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                        {triggersForCard.length > 0 && (
+                          <div className="mt-3 border-t border-neutral-100 pt-3 space-y-2">
+                            {triggersForCard.map((t) => (
+                              <p
+                                key={t.id}
+                                className={`text-sm font-medium ${t.met ? "text-red-700" : "text-neutral-500"}`}
+                              >
+                                Trigger: {t.label} – {t.resultLabel} ({t.conditionDescription}).
+                              </p>
                             ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
-                        <span className="text-neutral-600">Trend:</span>
-                        <span className="font-medium text-neutral-900">{HISTORICAL_TREND_INDICATOR}</span>
-                        <span className="text-neutral-500">·</span>
-                        <span className="text-neutral-600">Current wire:</span>
-                        <span className="font-medium tabular-nums text-neutral-900">{selectedAlert.amount}</span>
-                        <span className="text-neutral-600">vs historical max (6mo):</span>
-                        <span className="font-medium tabular-nums text-neutral-900">${historicalMax.toLocaleString()}</span>
-                        {currentWire > historicalMax && <span className="text-red-600 font-medium">(above max)</span>}
-                      </div>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        Current transaction is the highest outbound in {xMonths} month{xMonths === 1 ? "" : "s"}.
-                      </p>
-                    </section>
-                  );
+                          </div>
+                        )}
+                      </section>
+                    );
+                  });
                 })()}
 
-                {/* Behavioral Risk Composite — below Historical Outbound Trend (6m) */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Behavioral Risk Composite
-                  </h3>
-                  <p className="mt-1.5 text-xs text-neutral-500">
-                    Behavioral consistency scale: 0 = highly inconsistent, 100 = fully consistent.
-                  </p>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Baseline deviation severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.baselineDeviationSeverity}</dd></div>
-                    <div><dt className="text-neutral-500">Velocity severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.velocitySeverity}</dd></div>
-                    <div><dt className="text-neutral-500">Corridor novelty severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.corridorNoveltySeverity}</dd></div>
-                    <div><dt className="text-neutral-500">Revenue strain severity</dt><dd className="font-medium text-neutral-900">{BEHAVIORAL_RISK_COMPOSITE.revenueStrainSeverity}</dd></div>
-                    <div>
-                      <dt className="text-neutral-500">Behavioral consistency score (0–100)</dt>
-                      <dd className="font-medium text-neutral-900 tabular-nums inline-flex items-center">
-                        {BEHAVIORAL_RISK_COMPOSITE.behavioralConsistencyScore}
-                        <BehavioralConsistencyTooltip />
-                      </dd>
-                    </div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm font-medium text-neutral-800">
-                    Overall behavioral anomaly level: {getBehavioralAnomalySeverity(BEHAVIORAL_RISK_COMPOSITE.behavioralConsistencyScore)}. Lower scores indicate greater deviation from historical behavior.
-                  </p>
-                </section>
-
-                {/* Source of Funds & Movement Timing — below Historical Outbound Trend */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Source of Funds &amp; Movement Timing
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Largest inbound within 7 days prior to wire</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.largestInboundWithin7Days.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">Date of inbound</dt><dd className="font-medium text-neutral-900">{SOURCE_OF_FUNDS.dateOfInbound}</dd></div>
-                    <div><dt className="text-neutral-500">Date of outbound</dt><dd className="font-medium text-neutral-900">{SOURCE_OF_FUNDS.dateOfOutbound}</dd></div>
-                    <div><dt className="text-neutral-500">Time gap between inbound and outbound (hours)</dt><dd className="font-medium text-neutral-900 tabular-nums">{SOURCE_OF_FUNDS.timeGapHours}h</dd></div>
-                    <div><dt className="text-neutral-500">Account balance before inbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.accountBalanceBeforeInbound.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">Account balance after outbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${SOURCE_OF_FUNDS.accountBalanceAfterOutbound.toLocaleString()}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    Funds were held for {SOURCE_OF_FUNDS.timeGapHours} hours before being wired out.
-                  </p>
-                  {SOURCE_OF_FUNDS.timeGapHours < 24 ? (
-                    <p className="mt-2 text-sm font-medium text-red-700">
-                      Trigger: Rapid Movement — set (time gap between inbound and outbound &lt;24 hours).
-                    </p>
-                  ) : null}
-                </section>
-
-                {/* Inbound Counterparty & Source Legitimacy — below Source of Funds, above Short-Term Velocity */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Inbound Counterparty &amp; Source Legitimacy
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Inbound counterparty name (largest inbound funding this transaction)</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyName}</dd></div>
-                    <div><dt className="text-neutral-500">Counterparty industry</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyIndustry ?? "—"}</dd></div>
-                    <div><dt className="text-neutral-500">Counterparty jurisdiction</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.counterpartyJurisdiction}</dd></div>
-                    <div><dt className="text-neutral-500">First-time sender indicator</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.firstTimeSender ? "Yes" : "No"}</dd></div>
-                    <div><dt className="text-neutral-500">Prior transaction count with this sender</dt><dd className="font-medium text-neutral-900 tabular-nums">{INBOUND_COUNTERPARTY.priorTransactionCountWithSender}</dd></div>
-                    <div><dt className="text-neutral-500">Sender internal risk rating</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.senderInternalRiskRating ?? "—"}</dd></div>
-                    <div><dt className="text-neutral-500">Sanctions screening result for sender</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.sanctionsScreeningResult}</dd></div>
-                    <div><dt className="text-neutral-500">Adverse media indicator</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.adverseMediaIndicator ? "Yes" : "No"}</dd></div>
-                    <div><dt className="text-neutral-500">Network overlap (other customers transacting with this sender)</dt><dd className="font-medium text-neutral-900 tabular-nums">{INBOUND_COUNTERPARTY.networkOverlap}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    Inbound funds originated from a {INBOUND_COUNTERPARTY.firstTimeSender ? "new" : "existing"} counterparty.
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-700">
-                    Source legitimacy risk: {INBOUND_COUNTERPARTY.sourceLegitimacyRisk}.
-                  </p>
-                </section>
-
-                {/* Adverse Media / Reputation — financial crime / reputation risk */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Adverse Media / Reputation
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Adverse media indicator (financial crime)</dt><dd className="font-medium text-neutral-900">{INBOUND_COUNTERPARTY.adverseMediaIndicator ? "Yes" : "No"}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    {INBOUND_COUNTERPARTY.adverseMediaIndicator ? "Adverse media screening identified items related to financial crime or reputation risk." : "No adverse media indicating financial crime identified."}
-                  </p>
-                  {INBOUND_COUNTERPARTY.adverseMediaIndicator ? (
-                    <p className="mt-2 text-sm font-medium text-red-700">
-                      Trigger: Negative Media Risk — set (adverse media indicates financial crime).
-                    </p>
-                  ) : null}
-                </section>
-
-                {/* Short-Term Velocity Analysis — below Source of Funds & Movement Timing, above Beneficiary Risk */}
-                {(() => {
-                  const v = SHORT_TERM_VELOCITY;
-                  const spikeMultiple7d = v.historical7DayAvgOutbound > 0 ? (v.totalOutboundLast7Days / v.historical7DayAvgOutbound) : 0;
-                  const anomalyDetected = spikeMultiple7d >= 1.5;
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Short-Term Velocity Analysis
-                      </h3>
-                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div><dt className="text-neutral-500">Total outbound in last 7 days</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.totalOutboundLast7Days.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Historical 7-day average outbound</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.historical7DayAvgOutbound.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Spike multiple (7d)</dt><dd className="font-medium text-neutral-900 tabular-nums">{spikeMultiple7d.toFixed(1)}x normal</dd></div>
-                        <div><dt className="text-neutral-500">Total outbound in last 30 days</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.totalOutboundLast30Days.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Historical 30-day average</dt><dd className="font-medium text-neutral-900 tabular-nums">${v.historical30DayAvg.toLocaleString()}</dd></div>
-                        <div><dt className="text-neutral-500">Short-term spike severity indicator</dt><dd className="font-medium text-neutral-900">{v.spikeSeverity}</dd></div>
-                      </dl>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        7-day outbound volume is {spikeMultiple7d.toFixed(1)} times historical norm.
-                      </p>
-                      <p className="mt-1 text-sm text-neutral-700">
-                        Short-term velocity anomaly detected: {anomalyDetected ? "Yes" : "No"}.
-                      </p>
-                      {spikeMultiple7d > 3 ? (
-                        <p className="mt-2 text-sm font-medium text-red-700">
-                          Trigger: Velocity Spike — set (7-day transaction volume exceeds 3× historical average).
-                        </p>
-                      ) : null}
-                    </section>
-                  );
-                })()}
-
-                {/* Beneficiary Risk & Relationship Assessment — below Source of Funds & Movement Timing */}
-                {(() => {
-                  const b = BENEFICIARY_RISK;
-                  const isNewAndElevated = b.firstTimeBeneficiary && b.priorTransactionCount === 0;
-                  const summaryText = isNewAndElevated
-                    ? "Beneficiary relationship is new and located in an elevated-risk jurisdiction."
-                    : "Beneficiary has prior transaction history and established relationship.";
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Beneficiary Risk &amp; Relationship Assessment
-                      </h3>
-                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div><dt className="text-neutral-500">Beneficiary entity age (incorporation date)</dt><dd className="font-medium text-neutral-900">{b.incorporationDate ?? "—"}</dd></div>
-                        <div><dt className="text-neutral-500">Industry classification</dt><dd className="font-medium text-neutral-900">{b.industryClassification ?? "—"}</dd></div>
-                        <div><dt className="text-neutral-500">Jurisdiction risk tier</dt><dd className="font-medium text-neutral-900">{b.jurisdictionRiskTier}</dd></div>
-                        <div><dt className="text-neutral-500">First-time beneficiary indicator</dt><dd className="font-medium text-neutral-900">{b.firstTimeBeneficiary ? "Yes" : "No"}</dd></div>
-                        <div><dt className="text-neutral-500">Prior transaction count with this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">{b.priorTransactionCount}</dd></div>
-                        <div><dt className="text-neutral-500">Sanctions screening result</dt><dd className="font-medium text-neutral-900">{b.sanctionsScreeningResult}</dd></div>
-                      </dl>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        {summaryText}
-                      </p>
-                      {b.firstTimeBeneficiary ? (
-                        <p className="mt-2 text-sm font-medium text-red-700">
-                          Trigger: First-Time Beneficiary — set (first-time beneficiary = Yes).
-                        </p>
-                      ) : null}
-                    </section>
-                  );
-                })()}
-
-                {/* Network Exposure & Counterparty Linkage — below Beneficiary Risk, above Stated Purpose & Documentation Review */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Network Exposure &amp; Counterparty Linkage
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Number of other customers who transacted with this beneficiary in last 90 days</dt><dd className="font-medium text-neutral-900 tabular-nums">{NETWORK_EXPOSURE.otherCustomersWithThisBeneficiary90d}</dd></div>
-                    <div><dt className="text-neutral-500">Number of those alerts escalated or SAR filed</dt><dd className="font-medium text-neutral-900 tabular-nums">{NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled}</dd></div>
-                    <div><dt className="text-neutral-500">Cluster risk indicator</dt><dd className="font-medium text-neutral-900">{NETWORK_EXPOSURE.clusterRiskIndicator}</dd></div>
-                    <div><dt className="text-neutral-500">Corridor concentration score</dt><dd className="font-medium text-neutral-900">{NETWORK_EXPOSURE.corridorConcentrationScore}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    This beneficiary appears in {NETWORK_EXPOSURE.otherCustomersWithThisBeneficiary90d} other alerts institution-wide.
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-700">
-                    Cluster risk: {NETWORK_EXPOSURE.clusterRiskIndicator}.
-                  </p>
-                  {NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled > 0 ? (
-                    <p className="mt-2 text-sm font-medium text-red-700">
-                      Trigger: Prior SAR/Alert History — set (this beneficiary or counterparty was involved in prior SARs or escalated alerts).
-                    </p>
-                  ) : null}
-                </section>
-
-                {/* Exposure Aggregation Summary — below Network Exposure & Counterparty Linkage */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Exposure Aggregation Summary
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Total lifetime exposure to this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.totalLifetimeExposureBeneficiary.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">Total 90-day exposure to this beneficiary</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.total90DayExposureBeneficiary.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">Total lifetime exposure to this country</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.totalLifetimeExposureCountry.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">Total 90-day exposure to this country</dt><dd className="font-medium text-neutral-900 tabular-nums">${EXPOSURE_AGGREGATION.total90DayExposureCountry.toLocaleString()}</dd></div>
-                    <div><dt className="text-neutral-500">% of outbound volume directed to this jurisdiction (90d)</dt><dd className="font-medium text-neutral-900 tabular-nums">{EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d}%</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                    Country concentration risk: {EXPOSURE_AGGREGATION.countryConcentrationRisk}.
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-700">
-                    Beneficiary exposure concentration: {EXPOSURE_AGGREGATION.beneficiaryExposureConcentration}.
-                  </p>
-                  {EXPOSURE_AGGREGATION.pctOutboundVolumeToJurisdiction90d > 50 && EXPOSURE_AGGREGATION.countryConcentrationRisk === "High" ? (
-                    <p className="mt-2 text-sm font-medium text-red-700">
-                      Trigger: Concentration Risk — set (over 50% of recent outbound volume went to a single high-risk jurisdiction).
-                    </p>
-                  ) : null}
-                </section>
-
-                {/* Stated Purpose & Documentation Review — below Beneficiary Risk & Relationship Assessment */}
-                {(() => {
-                  const d = STATED_PURPOSE_DOCS;
-                  const priorDocPct = d.priorTradeWiresTotal > 0 ? Math.round((d.priorTradeWiresWithDocumentationCount / d.priorTradeWiresTotal) * 100) : 0;
-                  const documentationGapPresent = !d.documentationAttached;
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Stated Purpose &amp; Documentation Review
-                      </h3>
-                      <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div className="sm:col-span-2"><dt className="text-neutral-500">Payment reference text</dt><dd className="font-medium text-neutral-900">{d.paymentReferenceText}</dd></div>
-                        <div><dt className="text-neutral-500">Documentation attached</dt><dd className="font-medium text-neutral-900">{d.documentationAttached ? "Yes" : "No"}</dd></div>
-                        <div><dt className="text-neutral-500">Prior trade wires with documentation count</dt><dd className="font-medium text-neutral-900 tabular-nums">{d.priorTradeWiresWithDocumentationCount} of {d.priorTradeWiresTotal}</dd></div>
-                        <div><dt className="text-neutral-500">Average documented trade wire amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{d.averageDocumentedTradeWireAmount != null ? `$${d.averageDocumentedTradeWireAmount.toLocaleString()}` : "—"}</dd></div>
-                        <div><dt className="text-neutral-500">Documentation gap</dt><dd className="font-medium text-neutral-900">{documentationGapPresent ? "Present" : "Not Present"}</dd></div>
-                      </dl>
-                      <p className="mt-3 border-t border-neutral-100 pt-3 text-sm text-neutral-700">
-                        Prior trade wires included documentation in {priorDocPct}% of cases.
-                      </p>
-                      <p className="mt-1 text-sm text-neutral-700">
-                        {d.documentationAttached ? "Supporting documentation on file." : "No supporting documentation currently on file."}
-                      </p>
-                      {documentationGapPresent ? (
-                        <p className="mt-2 text-sm font-medium text-red-700">
-                          Trigger: Documentation Gap — set (documentation missing or inconsistent).
-                        </p>
-                      ) : null}
-                    </section>
-                  );
-                })()}
-
-                {/* Mitigating Factors Assessment */}
-                <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Mitigating Factors Assessment
-                  </h3>
-                  <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                    <div><dt className="text-neutral-500">Account tenure (months with institution)</dt><dd className="font-medium text-neutral-900 tabular-nums">{MITIGATING_FACTORS.accountTenureMonths}</dd></div>
-                    <div><dt className="text-neutral-500">Date of last Enhanced Due Diligence (EDD)</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.dateOfLastEDD ?? "—"}</dd></div>
-                    <div><dt className="text-neutral-500">Beneficial ownership verified</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.beneficialOwnershipVerified ? "Yes" : "No"}</dd></div>
-                    <div><dt className="text-neutral-500">KYC review status</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.kycReviewStatus}</dd></div>
-                    <div className="sm:col-span-2"><dt className="text-neutral-500">Historical alert resolution pattern</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.historicalAlertResolutionPattern}</dd></div>
-                    <div><dt className="text-neutral-500">Relationship stability indicator</dt><dd className="font-medium text-neutral-900">{MITIGATING_FACTORS.relationshipStabilityIndicator}</dd></div>
-                  </dl>
-                  <p className="mt-3 border-t border-neutral-100 pt-3 text-sm font-medium text-neutral-800">
-                    Mitigation strength: {MITIGATING_FACTORS.mitigationStrength}.
-                  </p>
-                </section>
                 </>
               )}
 
@@ -2606,42 +2463,74 @@ The activity is inconsistent with the customer's historical behavior and declare
                 <div className="space-y-4">
                   {escalationRecord ? (
                     <>
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <strong>Escalation Record Locked.</strong> This record was captured at confirmation and cannot be edited in place. Amendments create a new version and require an amendment reason.
+                      </div>
                       <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                          Escalation Rationale (locked)
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-2">
+                          Escalation rationale (locked)
                         </h3>
-                        <p className="mt-2 text-xs text-neutral-500">
+                        <p className="text-xs text-neutral-500 mb-3">
                           This rationale was captured at escalation and cannot be edited. Amendments require versioning and a log entry.
                         </p>
-                        <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-800">
-                          {escalationRecord.rationale}
-                        </pre>
+                        <section className="space-y-4">
+                          <div>
+                            <h4 className="text-xs font-medium text-neutral-500 mb-1">Escalation Decision Summary</h4>
+                            <p className="text-sm text-neutral-800">{escalationRecord.decisionSummary}</p>
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-medium text-neutral-500 mb-1">Primary Risk Drivers</h4>
+                            <ul className="list-disc list-inside text-sm text-neutral-800 space-y-1">
+                              {escalationRecord.primaryRiskDrivers.map((d, i) => (
+                                <li key={i}>{d}</li>
+                              ))}
+                            </ul>
+                          </div>
+                          {"additionalCommentary" in escalationRecord && (escalationRecord as EscalationRecord).additionalCommentary ? (
+                            <div>
+                              <h4 className="text-xs font-medium text-neutral-500 mb-1">Additional Analyst Commentary</h4>
+                              <p className="text-sm text-neutral-800 whitespace-pre-wrap">{(escalationRecord as EscalationRecord).additionalCommentary}</p>
+                            </div>
+                          ) : null}
+                          <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                            <h4 className="text-xs font-medium text-neutral-500 mb-1">Regulatory statement</h4>
+                            <p className="text-sm text-neutral-800 italic">{escalationRecord.regulatoryStatement}</p>
+                          </div>
+                        </section>
                       </section>
                       <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
                         <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
                           Escalation metadata
                         </h3>
                         <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                          <div><dt className="text-neutral-500">Version ID</dt><dd className="font-medium font-mono text-neutral-900 text-xs">{"versionId" in escalationRecord ? (escalationRecord as EscalationRecord).versionId : "—"}</dd></div>
                           <div><dt className="text-neutral-500">Escalated by</dt><dd className="font-medium text-neutral-900">{escalationRecord.userId}</dd></div>
                           <div><dt className="text-neutral-500">Escalation timestamp</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.timestamp}</dd></div>
-                          <div><dt className="text-neutral-500">Triggers met at escalation</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.triggersMet} of {escalationRecord.triggersTotal}</dd></div>
-                          <div><dt className="text-neutral-500">Policy threshold</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.threshold}</dd></div>
-                          <div><dt className="text-neutral-500">Deviation % (90-day baseline)</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.deviationPct}%</dd></div>
-                          <div><dt className="text-neutral-500">Time gap (hours)</dt><dd className="font-medium text-neutral-900 tabular-nums">{escalationRecord.timeGapHours}h</dd></div>
+                          <div><dt className="text-neutral-500">Analyst escalation classification</dt><dd className="font-medium text-neutral-900">{escalationRecord.classification.join(", ") || "—"}</dd></div>
+                          <div><dt className="text-neutral-500">Analyst confidence</dt><dd className="font-medium text-neutral-900">{escalationRecord.analystConfidence}</dd></div>
                         </dl>
-                      </section>
-                      <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-                        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
-                          Trigger snapshot at time of escalation
-                        </h3>
-                        <ul className="space-y-1.5 text-sm">
-                          {escalationRecord.triggerSnapshot.map((t, i) => (
-                            <li key={i} className="flex items-center gap-2">
-                              {t.met ? <span className="text-red-600" aria-label="Met">✓</span> : <span className="text-neutral-300" aria-label="Not met">✗</span>}
-                              <span className={t.met ? "text-neutral-900" : "text-neutral-500"}>{t.label}</span>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-neutral-100 pt-4">
+                          {"versionId" in escalationRecord && (
+                            <button
+                              type="button"
+                              onClick={() => setViewEscalationModalOpen(true)}
+                              className="text-sm font-medium text-blue-600 hover:text-blue-800 underline"
+                            >
+                              Version History
+                              {"versionHistory" in escalationRecord && (escalationRecord as EscalationRecord).versionHistory?.length > 0
+                                ? ` (${(escalationRecord as EscalationRecord).versionHistory!.length} prior)` : ""}
+                            </button>
+                          )}
+                          {HAS_AMENDMENT_PERMISSION && (
+                            <button
+                              type="button"
+                              onClick={() => setAmendmentModalOpen(true)}
+                              className="rounded-lg border border-neutral-200 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                            >
+                              Amend (new version)
+                            </button>
+                          )}
+                        </div>
                       </section>
                       <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
                         <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-3">
@@ -3073,50 +2962,213 @@ The activity is inconsistent with the customer's historical behavior and declare
       )}
 
       {/* Confirm Escalation – Initial Escalation Record modal */}
-      {escalationModalOpen && (
+      {escalationModalOpen && (() => {
+        const content = getEscalationStructuredContent();
+        const summaryValidation = validateDecisionSummary(decisionSummaryDraft.trim());
+        const canConfirm =
+          summaryValidation.valid &&
+          analystConfidence !== null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setEscalationModalOpen(false)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-escalation-title"
+          >
+            <div
+              className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col rounded-xl border border-neutral-200 bg-white shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 id="confirm-escalation-title" className="shrink-0 border-b border-neutral-200 px-6 py-4 text-base font-semibold text-neutral-900">
+                Confirm Escalation – Initial Escalation Record
+              </h2>
+              <p className="shrink-0 px-6 pt-3 text-xs text-neutral-500">
+                Edit analyst-facing fields as needed. System-derived values (grey) are read-only. After confirmation, the record is locked; amendments require versioning.
+              </p>
+              <div className="flex-1 min-h-0 overflow-auto px-6 py-3 space-y-5">
+                {/* A) Escalation Decision Summary – editable, structured default */}
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-2">
+                    Escalation Decision Summary <span className="text-red-600">*</span>
+                  </h3>
+                  <textarea
+                    value={decisionSummaryDraft}
+                    onChange={(e) => setDecisionSummaryDraft(e.target.value.slice(0, 2000))}
+                    maxLength={2000}
+                    rows={14}
+                    className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400 font-mono"
+                    placeholder="Concise escalation memo: transaction facts, risk drivers, and escalation justification (min. 3 numeric refs, 1 jurisdiction ref, 1 historical comparison)…"
+                  />
+                  <p className="mt-1 text-xs text-neutral-500">{decisionSummaryDraft.length} / 2000</p>
+                  {decisionSummaryDraft.trim().length > 0 && !validateDecisionSummary(decisionSummaryDraft.trim()).valid && (
+                    <p className="mt-1 text-xs text-amber-600" role="alert">
+                      {validateDecisionSummary(decisionSummaryDraft.trim()).message}
+                    </p>
+                  )}
+                </section>
+                {/* Additional Analyst Commentary – optional */}
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-2">
+                    Additional Analyst Commentary
+                  </h3>
+                  <textarea
+                    value={additionalCommentary}
+                    onChange={(e) => setAdditionalCommentary(e.target.value.slice(0, 1500))}
+                    maxLength={1500}
+                    rows={3}
+                    className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400"
+                    placeholder="Optional: contextual clarifications, outreach attempts…"
+                  />
+                  <p className="mt-1 text-xs text-neutral-500">{additionalCommentary.length} / 1500</p>
+                </section>
+                {/* Analyst Confidence Level */}
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-2">
+                    Analyst Confidence Level <span className="text-red-600">*</span>
+                  </h3>
+                  <div className="flex flex-wrap gap-4">
+                    {(["High confidence", "Moderate confidence", "Low confidence"] as const).map((label) => {
+                      const value = label.split(" ")[0] as "High" | "Moderate" | "Low";
+                      return (
+                        <label key={value} className="flex items-center gap-2 text-sm text-neutral-800 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="analyst-confidence"
+                            checked={analystConfidence === value}
+                            onChange={() => setAnalystConfidence(value)}
+                            className="border-neutral-300"
+                          />
+                          <span>{label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+                {/* Regulatory statement – read-only system-derived */}
+                <section className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                  <p className="text-sm text-neutral-800 italic">
+                    {content.regulatoryStatement}
+                  </p>
+                </section>
+              </div>
+              <div className="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-neutral-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEscalationModalOpen(false);
+                    setEscalationRationaleDraft("");
+                    setDecisionSummaryDraft("");
+                    setAdditionalCommentary("");
+                    setSelectedSupportingIndices([]);
+                    setAnalystConfidence(null);
+                    setOutreachRequired(false);
+                  }}
+                  className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEscalateConfirm}
+                  disabled={!canConfirm}
+                  className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Confirm Escalation
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Amendment modal – create new version with reason */}
+      {amendmentModalOpen && escalationRecord && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setEscalationModalOpen(false)}
+          onClick={() => setAmendmentModalOpen(false)}
           role="dialog"
           aria-modal="true"
-          aria-labelledby="confirm-escalation-title"
+          aria-labelledby="amendment-title"
         >
           <div
-            className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col rounded-xl border border-neutral-200 bg-white shadow-xl"
+            className="w-full max-w-md rounded-xl border border-neutral-200 bg-white p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="confirm-escalation-title" className="shrink-0 border-b border-neutral-200 px-6 py-4 text-base font-semibold text-neutral-900">
-              Confirm Escalation – Initial Escalation Record
+            <h2 id="amendment-title" className="text-base font-semibold text-neutral-900">
+              Create amendment
             </h2>
-            <p className="shrink-0 px-6 pt-3 text-xs text-neutral-500">
-              Review and edit escalation rationale if needed. After confirmation, the rationale is locked and cannot be edited without versioning and a log amendment.
+            <p className="mt-2 text-sm text-neutral-600">
+              Creating an amendment will record a new version of the escalation record. You must provide a reason. This action requires supervisor or amendment permission.
             </p>
-            <div className="flex-1 min-h-0 overflow-auto px-6 py-3">
-              <textarea
-                value={escalationRationaleDraft}
-                onChange={(e) => setEscalationRationaleDraft(e.target.value)}
-                rows={16}
-                className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400"
-                placeholder="Escalation rationale…"
-              />
-            </div>
-            <div className="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-neutral-200">
+            <label className="mt-4 block text-xs font-medium text-neutral-500">
+              Amendment reason <span className="text-red-600">*</span>
+            </label>
+            <textarea
+              value={amendmentReason}
+              onChange={(e) => setAmendmentReason(e.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400"
+              placeholder="e.g. Customer provided additional documentation; risk reassessed."
+            />
+            <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setEscalationModalOpen(false);
-                  setEscalationRationaleDraft("");
-                }}
+                onClick={() => { setAmendmentModalOpen(false); setAmendmentReason(""); }}
                 className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={handleEscalateConfirm}
-                className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800"
+                onClick={handleAmendmentConfirm}
+                disabled={!amendmentReason.trim()}
+                className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Confirm Escalation
+                Create new version
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Version History modal */}
+      {viewEscalationModalOpen && escalationRecord && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setViewEscalationModalOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="version-history-title"
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-neutral-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="version-history-title" className="text-base font-semibold text-neutral-900">
+              Version History
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Current version: {"versionId" in escalationRecord ? (escalationRecord as EscalationRecord).versionId : "—"}
+            </p>
+            <ul className="mt-4 space-y-3">
+              {("versionHistory" in escalationRecord ? (escalationRecord as EscalationRecord).versionHistory : []).map((entry: EscalationVersionEntry) => (
+                <li key={entry.versionId} className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm">
+                  <div className="font-mono text-xs text-neutral-500">{entry.versionId}</div>
+                  <div className="mt-1 text-neutral-800">{entry.timestamp} · {entry.userId}</div>
+                  {entry.amendmentReason && (
+                    <p className="mt-2 text-neutral-600 italic">Amendment: {entry.amendmentReason}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setViewEscalationModalOpen(false)}
+                className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+              >
+                Close
               </button>
             </div>
           </div>

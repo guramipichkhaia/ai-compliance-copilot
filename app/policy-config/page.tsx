@@ -1,163 +1,358 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   getPolicyConfig,
   savePolicyConfig,
   getDefaultPolicyConfig,
   type PolicyConfig,
-  type TriggerConfig,
-  type TriggerThresholdUnit,
-  type ComparisonOperator,
+  type UnifiedTriggerConfig,
 } from "@/lib/policy-config";
+import {
+  getCards,
+  getFieldByKey,
+  getOperatorsForField,
+  searchFields,
+  type CaseFieldDef,
+} from "@/lib/case-field-registry";
 
-const COMPARISON_OPERATORS: { value: ComparisonOperator; label: string }[] = [
-  { value: ">", label: ">" },
-  { value: ">=", label: "≥" },
-  { value: "<", label: "<" },
-  { value: "<=", label: "≤" },
-  { value: "=", label: "=" },
-];
+function generateTriggerId(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `custom_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
 
-const THRESHOLD_UNITS: { value: TriggerThresholdUnit; label: string }[] = [
-  { value: "percentage", label: "Percentage (%)" },
-  { value: "amount", label: "Amount ($)" },
-  { value: "hours", label: "Hours" },
-  { value: "count", label: "Count" },
-  { value: "multiplier", label: "Multiplier (×)" },
-  { value: "percentile", label: "Percentile" },
-  { value: "boolean", label: "Boolean (on/off)" },
-];
+/** For boolean fields we do not show threshold; trigger always fires when value === true. */
+function ThresholdInput({
+  fieldKey,
+  value,
+  onChange,
+  disabled,
+}: {
+  fieldKey: string;
+  value: number | string | boolean;
+  onChange: (v: number | string | boolean) => void;
+  disabled?: boolean;
+}) {
+  const field = getFieldByKey(fieldKey);
+  if (!field) {
+    return (
+      <input
+        type="number"
+        value={typeof value === "number" ? value : ""}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        disabled={disabled}
+        className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-[13px] tabular-nums"
+      />
+    );
+  }
+  if (field.type === "boolean") {
+    return <span className="text-neutral-500 text-[13px]">—</span>;
+  }
+  if (field.type === "enum" && field.options) {
+    return (
+      <select
+        value={String(value)}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="rounded border border-neutral-300 px-1.5 py-1 text-[13px] min-w-[140px]"
+      >
+        {field.options.map((opt) => (
+          <option key={opt} value={opt}>{opt}</option>
+        ))}
+      </select>
+    );
+  }
+  const isPercent = field.unit === "%" || field.type === "percentage";
+  const numVal = typeof value === "number" ? value : parseFloat(String(value)) || 0;
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      <input
+        type="number"
+        value={numVal}
+        step={isPercent ? 1 : 0.1}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        disabled={disabled}
+        className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-[13px] tabular-nums"
+      />
+      {(isPercent && <span className="text-neutral-500 text-[13px]">%</span>) || (field.unit && <span className="text-neutral-500 text-[13px]">{field.unit}</span>)}
+    </span>
+  );
+}
+
+function UnitDisplay({ fieldKey }: { fieldKey: string }) {
+  const field = getFieldByKey(fieldKey);
+  if (!field?.unit) return <span className="text-neutral-400 text-[13px]">—</span>;
+  return <span className="text-neutral-600 text-[13px]">{field.unit}</span>;
+}
+
+type FieldOption = { cardTitle: string; field: CaseFieldDef };
+
+function FieldPickerDropdown({
+  value,
+  onSelect,
+  disabled,
+}: {
+  value: string;
+  onSelect: (fieldKey: string, field: CaseFieldDef) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const cards = getCards();
+  const allOptions: FieldOption[] = query.trim()
+    ? searchFields(query).map((r) => ({ cardTitle: r.cardTitle, field: r.field }))
+    : cards.flatMap((c) => c.fields.map((f) => ({ cardTitle: c.cardTitle, field: f })));
+
+  const currentLabel = getFieldByKey(value)?.label ?? value;
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setHighlightedIndex(0);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current;
+    if (!el) return;
+    const focusable = el.querySelectorAll<HTMLElement>("[data-field-key]");
+    const node = focusable[highlightedIndex];
+    node?.scrollIntoView({ block: "nearest" });
+  }, [highlightedIndex, open, allOptions.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setHighlightedIndex((i) => (i + 1) % allOptions.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setHighlightedIndex((i) => (i - 1 + allOptions.length) % allOptions.length);
+        return;
+      }
+      if (e.key === "Enter" && allOptions[highlightedIndex]) {
+        e.preventDefault();
+        onSelect(allOptions[highlightedIndex].field.key, allOptions[highlightedIndex].field);
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, highlightedIndex, allOptions, onSelect]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative min-w-[200px]">
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        className="w-full rounded border border-neutral-300 px-1.5 py-1 text-left text-[13px] min-w-[200px] bg-white hover:bg-neutral-50 disabled:opacity-50"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        {currentLabel}
+      </button>
+      {open && (
+        <div
+          className="absolute top-full left-0 z-50 mt-0.5 w-full max-w-[320px] rounded-lg border border-neutral-200 bg-white shadow-lg overflow-hidden"
+          role="listbox"
+        >
+          <div className="p-1.5 border-b border-neutral-100">
+            <input
+              type="search"
+              placeholder="Search fields..."
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setHighlightedIndex(0);
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+              className="w-full rounded border border-neutral-300 px-2 py-1.5 text-[13px]"
+              autoFocus
+            />
+          </div>
+          <div ref={listRef} className="max-h-[280px] overflow-y-auto py-1">
+            {allOptions.length === 0 ? (
+              <p className="px-3 py-2 text-[13px] text-neutral-500">No fields match.</p>
+            ) : (
+              (() => {
+                let lastTitle = "";
+                return allOptions.map(({ cardTitle, field: f }, idx) => {
+                  const isHeader = cardTitle !== lastTitle;
+                  if (isHeader) lastTitle = cardTitle;
+                  const isHighlighted = idx === highlightedIndex;
+                  return (
+                    <div key={f.key}>
+                      {isHeader && (
+                        <div className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-500 bg-neutral-50 border-t border-neutral-100 first:border-t-0">
+                          {cardTitle}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        data-field-key={f.key}
+                        role="option"
+                        aria-selected={value === f.key}
+                        onClick={() => {
+                          onSelect(f.key, f);
+                          setOpen(false);
+                        }}
+                        onMouseEnter={() => setHighlightedIndex(idx)}
+                        className={`w-full text-left px-3 py-1.5 pl-5 text-[13px] ${isHighlighted ? "bg-neutral-100" : "hover:bg-neutral-50"} ${value === f.key ? "font-medium text-neutral-900" : "text-neutral-700"}`}
+                      >
+                        {f.label}
+                      </button>
+                    </div>
+                  );
+                });
+              })()
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TriggerRow({
   number,
   trigger,
   onChange,
   onRemove,
-  canRemove,
 }: {
   number: number;
-  trigger: TriggerConfig;
-  onChange: (t: TriggerConfig) => void;
+  trigger: UnifiedTriggerConfig;
+  onChange: (t: UnifiedTriggerConfig) => void;
   onRemove: () => void;
-  canRemove: boolean;
 }) {
-  const hasThreshold = trigger.thresholdUnit !== "boolean";
-  const hasCriticalThreshold = trigger.thresholdUnit === "hours" && trigger.type === "predefined";
-  const hasNumericOperator = hasThreshold;
+  const isPredefined = trigger.type === "predefined";
+  const operators = getOperatorsForField(trigger.fieldKey);
 
   return (
     <tr className="border-b border-neutral-200 hover:bg-neutral-50/50">
-      <td className="py-3 pl-4 pr-2 w-10 text-neutral-500 tabular-nums text-sm font-medium">
+      <td className="py-1.5 pl-3 pr-1.5 w-8 text-neutral-500 tabular-nums text-[13px] font-medium">
         {number}
       </td>
-      <td className="py-3 pr-2">
-        {trigger.type === "custom" ? (
+      <td className="py-1.5 pr-1.5">
+        {isPredefined ? (
+          <span className="font-medium text-neutral-900 text-[13px]">{trigger.name}</span>
+        ) : (
           <input
             type="text"
-            value={trigger.label}
-            onChange={(e) => onChange({ ...trigger, label: e.target.value })}
-            className="rounded border border-neutral-300 px-2 py-1 text-sm font-medium w-48"
+            value={trigger.name}
+            onChange={(e) => onChange({ ...trigger, name: e.target.value })}
+            className="rounded border border-neutral-300 px-1.5 py-0.5 text-[13px] font-medium w-36"
             placeholder="Trigger name"
           />
-        ) : (
-          <span className="font-medium text-neutral-900">{trigger.label}</span>
         )}
-        {trigger.type === "custom" && (
-          <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">Custom</span>
+        {!isPredefined && (
+          <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[11px] text-amber-800">Custom</span>
         )}
       </td>
-      <td className="py-3 px-2">
-        {hasThreshold ? (
-          <input
-            type="number"
-            min={0}
-            step={trigger.thresholdUnit === "percentage" || trigger.thresholdUnit === "percentile" ? 1 : trigger.thresholdUnit === "multiplier" ? 0.1 : 1}
-            value={trigger.thresholdValue}
-            onChange={(e) => onChange({ ...trigger, thresholdValue: parseFloat(e.target.value) || 0 })}
-            className="w-24 rounded border border-neutral-300 px-2 py-1.5 text-sm tabular-nums"
+      <td className="py-1.5 px-1.5">
+        {isPredefined ? (
+          <span className="text-neutral-700 text-[13px]">{getFieldByKey(trigger.fieldKey)?.label ?? trigger.fieldKey}</span>
+        ) : (
+          <FieldPickerDropdown
+            value={trigger.fieldKey}
+            onSelect={(fieldKey, f) => {
+              const defaultVal = f.type === "boolean" ? true : f.type === "enum" && f.options?.[0] ? f.options[0] : 0;
+              const ops = getOperatorsForField(fieldKey);
+              onChange({
+                ...trigger,
+                fieldKey,
+                operator: f.type === "boolean" ? "boolean_true" : (ops[0]?.value ?? ">"),
+                threshold: defaultVal,
+              });
+            }}
           />
-        ) : (
-          <span className="text-neutral-500 text-sm">—</span>
         )}
       </td>
-      <td className="py-3 px-2">
-        {trigger.type === "predefined" ? (
-          <span className="text-neutral-600 text-sm">{trigger.thresholdUnit}</span>
+      <td className="py-1.5 px-1.5">
+        {getFieldByKey(trigger.fieldKey)?.type === "boolean" ? (
+          <span className="text-neutral-600 text-[13px]">is true</span>
         ) : (
           <select
-            value={trigger.thresholdUnit}
-            onChange={(e) => onChange({ ...trigger, thresholdUnit: e.target.value as TriggerThresholdUnit })}
-            className="rounded border border-neutral-300 px-2 py-1.5 text-sm"
+            value={trigger.operator}
+            onChange={(e) => onChange({ ...trigger, operator: e.target.value })}
+            className="rounded border border-neutral-300 px-1.5 py-1 text-[13px] w-16"
           >
-            {THRESHOLD_UNITS.map((u) => (
-              <option key={u.value} value={u.value}>{u.label}</option>
-            ))}
-          </select>
-        )}
-      </td>
-      <td className="py-3 px-2">
-        {hasNumericOperator ? (
-          <select
-            value={trigger.comparisonOperator ?? "="}
-            onChange={(e) => onChange({ ...trigger, comparisonOperator: e.target.value as ComparisonOperator })}
-            className="rounded border border-neutral-300 px-2 py-1.5 text-sm w-14"
-          >
-            {COMPARISON_OPERATORS.map((o) => (
+            {operators.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
-        ) : (
-          <span className="text-neutral-400 text-sm">—</span>
         )}
       </td>
-      <td className="py-3 px-2">
-        {hasCriticalThreshold ? (
-          <input
-            type="number"
-            min={0}
-            value={trigger.criticalThresholdValue ?? ""}
-            placeholder="Optional"
-            onChange={(e) => onChange({ ...trigger, criticalThresholdValue: e.target.value === "" ? null : parseFloat(e.target.value) || 0 })}
-            className="w-20 rounded border border-neutral-300 px-2 py-1.5 text-sm tabular-nums"
+      <td className="py-1.5 px-1.5">
+        {getFieldByKey(trigger.fieldKey)?.type === "boolean" ? (
+          <span className="text-neutral-400 text-[13px]">—</span>
+        ) : (
+          <ThresholdInput
+            fieldKey={trigger.fieldKey}
+            value={trigger.threshold}
+            onChange={(v) => onChange({ ...trigger, threshold: v })}
           />
-        ) : (
-          <span className="text-neutral-400">—</span>
         )}
       </td>
-      <td className="py-3 px-2">
-        <label className="flex items-center gap-2">
+      <td className="py-1.5 px-1.5">
+        {getFieldByKey(trigger.fieldKey)?.type === "boolean" ? (
+          <span className="text-neutral-400 text-[13px]">—</span>
+        ) : (
+          <UnitDisplay fieldKey={trigger.fieldKey} />
+        )}
+      </td>
+      <td className="py-1.5 px-1.5">
+        <label className="flex items-center gap-1.5 cursor-pointer">
           <input
             type="checkbox"
-            checked={trigger.isCritical}
-            onChange={(e) => onChange({ ...trigger, isCritical: e.target.checked })}
-            className="h-4 w-4 rounded border-neutral-300"
+            checked={trigger.critical}
+            onChange={(e) => onChange({ ...trigger, critical: e.target.checked })}
+            className="h-3.5 w-3.5 rounded border-neutral-300"
           />
-          <span className="text-sm text-neutral-700">{trigger.isCritical ? "Critical" : "Regular"}</span>
+          <span className={`inline-flex items-center gap-1 text-[13px] ${trigger.critical ? "text-amber-700" : "text-neutral-600"}`}>
+            <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${trigger.critical ? "bg-amber-500" : "bg-neutral-400"}`} aria-hidden />
+            {trigger.critical ? "Critical" : "Regular"}
+          </span>
         </label>
       </td>
-      <td className="py-3 px-2">
-        {trigger.type === "custom" ? (
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={trigger.enabled}
-              onChange={(e) => onChange({ ...trigger, enabled: e.target.checked })}
-              className="h-4 w-4 rounded border-neutral-300"
-            />
-            <span className="text-sm text-neutral-600">Enabled</span>
-          </label>
-        ) : (
-          <span className="text-neutral-400 text-sm">—</span>
-        )}
+      <td className="py-1.5 px-1.5">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={trigger.enabled}
+            onChange={(e) => onChange({ ...trigger, enabled: e.target.checked })}
+            className="h-3.5 w-3.5 rounded border-neutral-300"
+          />
+          <span className="text-[13px] text-neutral-600">Enabled</span>
+        </label>
       </td>
-      <td className="py-3 pl-2">
-        {canRemove && (
+      <td className="py-1.5 pl-1.5">
+        {!isPredefined && (
           <button
             type="button"
             onClick={onRemove}
-            className="rounded text-red-600 hover:bg-red-50 px-2 py-1 text-sm"
+            className="rounded text-red-600 hover:bg-red-50 px-1.5 py-0.5 text-[13px]"
           >
             Remove
           </button>
@@ -171,12 +366,13 @@ export default function PolicyConfigPage() {
   const [config, setConfig] = useState<PolicyConfig>(getDefaultPolicyConfig());
   const [saved, setSaved] = useState(false);
   const [saveButtonJustSaved, setSaveButtonJustSaved] = useState(false);
+  const [escalationRuleOpen, setEscalationRuleOpen] = useState(false);
 
   useEffect(() => {
     setConfig(getPolicyConfig());
   }, []);
 
-  const updateTrigger = (index: number, next: TriggerConfig) => {
+  const updateTrigger = (index: number, next: UnifiedTriggerConfig) => {
     setConfig((c) => ({
       ...c,
       triggers: c.triggers.map((t, i) => (i === index ? next : t)),
@@ -186,7 +382,7 @@ export default function PolicyConfigPage() {
 
   const removeTrigger = (index: number) => {
     const t = config.triggers[index];
-    if (t.type !== "custom") return;
+    if (t?.type === "predefined") return;
     setConfig((c) => ({
       ...c,
       triggers: c.triggers.filter((_, i) => i !== index),
@@ -194,71 +390,53 @@ export default function PolicyConfigPage() {
     setSaved(false);
   };
 
-  const addCustomTrigger = () => {
-    const existingIds = new Set(config.triggers.map((t) => t.id));
-    let nextId = `custom_${Date.now()}`;
-    while (existingIds.has(nextId)) nextId = `custom_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const addNewTrigger = () => {
+    const cards = getCards();
+    const firstField = cards[0]?.fields[0];
+    const key = firstField?.key ?? "totalOutbound7d";
+    const f = firstField ?? getFieldByKey(key);
+    const ops = getOperatorsForField(key);
+    const defaultVal = f?.type === "boolean" ? true : f?.type === "enum" && f?.options?.[0] ? f.options[0] : 0;
+    const newTrigger: UnifiedTriggerConfig = {
+      id: generateTriggerId(),
+      name: "New trigger",
+      fieldKey: key,
+      operator: f?.type === "boolean" ? "boolean_true" : (ops[0]?.value ?? ">"),
+      threshold: defaultVal,
+      critical: false,
+      enabled: true,
+      type: "custom",
+    };
     setConfig((c) => ({
       ...c,
-      triggers: [
-        ...c.triggers,
-        {
-          id: nextId,
-          label: "New custom trigger",
-          type: "custom",
-          thresholdValue: 0,
-          thresholdUnit: "percentage",
-          comparisonOperator: ">" as const,
-          criticalThresholdValue: null,
-          isCritical: false,
-          enabled: true,
-        },
-      ],
+      triggers: [...c.triggers, newTrigger],
     }));
     setSaved(false);
   };
 
-  /**
-   * When the user clicks "Save Configuration," gather all predefined and custom triggers,
-   * including threshold values, critical toggles, and escalation counts. Update the trigger
-   * configuration object in memory, then persist it to your backend or local storage. Ensure
-   * that each trigger is uniquely associated with its ID, so cards can reference it dynamically.
-   */
-  const handleSave = () => {
-    const gathered = config.triggers.map((t) => ({
-      id: t.id,
-      label: t.label,
-      type: t.type,
-      thresholdValue: t.thresholdValue,
-      thresholdUnit: t.thresholdUnit,
-      comparisonOperator: t.comparisonOperator ?? "=",
-      criticalThresholdValue: t.criticalThresholdValue,
-      isCritical: t.isCritical,
-      enabled: t.enabled,
-    }));
-    const seenIds = new Set<string>();
-    const triggers = gathered.filter((t) => {
-      if (seenIds.has(t.id)) return false;
-      seenIds.add(t.id);
-      return true;
-    });
-    const triggerConfig: PolicyConfig = {
-      minRegularTriggersToEscalate: config.minRegularTriggersToEscalate,
-      triggers,
-    };
-    setConfig(triggerConfig);
-    savePolicyConfig(triggerConfig);
+  const resetToDefaultPolicy = () => {
+    const defaultConfig = getDefaultPolicyConfig();
+    setConfig(defaultConfig);
+    savePolicyConfig(defaultConfig);
     setSaved(true);
     setSaveButtonJustSaved(true);
     setTimeout(() => setSaveButtonJustSaved(false), 2500);
     setTimeout(() => setSaved(false), 3500);
   };
 
-  const regularCount = config.triggers.filter((t) => !t.isCritical && t.enabled).length;
+  const handleSave = () => {
+    savePolicyConfig(config);
+    setSaved(true);
+    setSaveButtonJustSaved(true);
+    setTimeout(() => setSaveButtonJustSaved(false), 2500);
+    setTimeout(() => setSaved(false), 3500);
+  };
+
+  const regularCount = config.triggers.filter((t) => !t.critical && t.enabled).length;
 
   return (
     <div className="min-h-screen bg-neutral-50">
-      <header className="border-b border-neutral-200 bg-white px-4 py-3 shadow-sm">
+      <header className="border-b border-neutral-200 bg-white px-4 py-2 shadow-sm">
         <div className="mx-auto flex max-w-5xl items-center justify-between">
           <div className="flex items-center gap-4">
             <Link href="/" className="text-neutral-600 hover:text-neutral-900 text-sm font-medium">
@@ -266,21 +444,30 @@ export default function PolicyConfigPage() {
             </Link>
             <h1 className="text-xl font-semibold text-neutral-900">Policy Configuration</h1>
           </div>
-          <button
-            type="button"
-            onClick={handleSave}
-            className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-              saveButtonJustSaved
-                ? "bg-emerald-600 text-white"
-                : "bg-neutral-900 text-white hover:bg-neutral-800"
-            }`}
-          >
-            {saveButtonJustSaved ? "✓ Saved" : "Save configuration"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={resetToDefaultPolicy}
+              className="rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+            >
+              Reset to Default Policy
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                saveButtonJustSaved
+                  ? "bg-emerald-600 text-white"
+                  : "bg-neutral-900 text-white hover:bg-neutral-800"
+              }`}
+            >
+              {saveButtonJustSaved ? "✓ Saved" : "Save configuration"}
+            </button>
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-4 py-6">
+      <main className="mx-auto max-w-5xl px-4 py-4">
         {saved && (
           <div
             role="alert"
@@ -289,67 +476,79 @@ export default function PolicyConfigPage() {
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white text-sm font-bold">✓</span>
             <div>
               <p className="font-semibold">Configuration saved</p>
-              <p className="text-sm text-emerald-700">Your triggers and escalation rules have been stored. The case page will use these settings at runtime.</p>
+              <p className="text-sm text-emerald-700">Triggers have been stored. The case page will use these settings at runtime.</p>
             </div>
           </div>
         )}
-        <div className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm mb-6">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-500 mb-2">
-            Escalation rule
-          </h2>
-          <p className="text-sm text-neutral-700 mb-3">
-            Escalate when <strong>at least N</strong> regular triggers are met, or <strong>any</strong> trigger marked as Critical is met.
-          </p>
-          <div className="flex items-center gap-4 flex-wrap">
-            <label className="flex items-center gap-2">
-              <span className="text-sm text-neutral-700">Min regular triggers to escalate:</span>
-              <input
-                type="number"
-                min={1}
-                max={config.triggers.length}
-                value={config.minRegularTriggersToEscalate}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!Number.isNaN(n)) {
-                    setConfig((c) => ({ ...c, minRegularTriggersToEscalate: n }));
-                    setSaved(false);
-                  }
-                }}
-                className="w-16 rounded border border-neutral-300 px-2 py-1.5 text-sm tabular-nums"
-              />
-            </label>
-            <span className="text-neutral-500 text-sm">
-              (e.g. &quot;{config.minRegularTriggersToEscalate} out of {regularCount}&quot; regular triggers)
-            </span>
-          </div>
+        <div className="rounded-lg border border-neutral-200 bg-white shadow-sm mb-4">
+          <button
+            type="button"
+            onClick={() => setEscalationRuleOpen((o) => !o)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-neutral-50/80"
+            aria-expanded={escalationRuleOpen}
+          >
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+              Escalation rule
+            </h2>
+            <span className="text-neutral-400 text-xs" aria-hidden>{escalationRuleOpen ? "▼" : "▶"}</span>
+          </button>
+          {escalationRuleOpen && (
+            <div className="border-t border-neutral-200 px-4 py-3">
+              <p className="text-[13px] text-neutral-700 mb-3">
+                Escalate when <strong>at least N</strong> regular triggers are met, or <strong>any</strong> trigger marked as Critical is met.
+              </p>
+              <div className="flex items-center gap-4 flex-wrap">
+                <label className="flex items-center gap-2">
+                  <span className="text-[13px] text-neutral-700">Min regular triggers to escalate:</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={Math.max(1, config.triggers.length)}
+                    value={config.minRegularTriggersToEscalate}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10);
+                      if (!Number.isNaN(n)) {
+                        setConfig((c) => ({ ...c, minRegularTriggersToEscalate: n }));
+                        setSaved(false);
+                      }
+                    }}
+                    className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-[13px] tabular-nums"
+                  />
+                </label>
+                <span className="text-neutral-500 text-[13px]">
+                  (e.g. &quot;{config.minRegularTriggersToEscalate} out of {regularCount}&quot; regular triggers)
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="rounded-lg border border-neutral-200 bg-white shadow-sm overflow-hidden">
-          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-500">
+          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-2 flex items-center justify-between">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
               Triggers
             </h2>
             <button
               type="button"
-              onClick={addCustomTrigger}
-              className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+              onClick={addNewTrigger}
+              className="rounded border border-neutral-300 bg-white px-2.5 py-1 text-[13px] font-medium text-neutral-700 hover:bg-neutral-50"
             >
-              + Add custom trigger
+              + Add New Trigger
             </button>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
                 <tr className="border-b border-neutral-200 bg-neutral-50/80">
-                  <th className="py-2.5 pr-2 pl-4 text-xs font-semibold uppercase text-neutral-500 w-10">#</th>
-                  <th className="py-2.5 pr-2 text-xs font-semibold uppercase text-neutral-500">Trigger</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Threshold</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Unit</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Operator</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Critical under (e.g. hours)</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Type</th>
-                  <th className="py-2.5 px-2 text-xs font-semibold uppercase text-neutral-500">Enabled</th>
-                  <th className="py-2.5 pl-2 text-xs font-semibold uppercase text-neutral-500"></th>
+                  <th className="py-1.5 pr-1.5 pl-3 text-[12px] font-semibold uppercase tracking-wider text-neutral-500 w-8">#</th>
+                  <th className="py-1.5 pr-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Trigger name</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Field</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Operator</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Threshold</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Unit</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">SEV</th>
+                  <th className="py-1.5 px-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Enabled</th>
+                  <th className="py-1.5 pl-1.5 text-[12px] font-semibold uppercase tracking-wider text-neutral-500"></th>
                 </tr>
               </thead>
               <tbody>
@@ -360,7 +559,6 @@ export default function PolicyConfigPage() {
                     trigger={trigger}
                     onChange={(t) => updateTrigger(index, t)}
                     onRemove={() => removeTrigger(index)}
-                    canRemove={trigger.type === "custom"}
                   />
                 ))}
               </tbody>
@@ -368,8 +566,8 @@ export default function PolicyConfigPage() {
           </div>
         </div>
 
-        <p className="mt-4 text-xs text-neutral-500">
-          Custom triggers are stored but not evaluated on the case page (no data source). Predefined triggers are evaluated using case data and the thresholds above.
+        <p className="mt-3 text-[11px] text-neutral-500">
+          Predefined triggers have fixed name and field; threshold, severity, and enabled are editable. Custom triggers are fully editable and can be removed.
         </p>
       </main>
     </div>
