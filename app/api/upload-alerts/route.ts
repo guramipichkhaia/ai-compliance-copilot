@@ -6,7 +6,8 @@ import {
 } from "@/lib/aml-alert-upload-schema";
 import { evaluateAlert, type EvaluatedAlert } from "@/lib/alert-evaluator";
 import { getDefaultPolicyConfig } from "@/lib/policy-config";
-import { setStoredAlerts } from "@/app/api/alerts/store";
+
+export const runtime = "nodejs";
 
 const CSV_MIME_TYPES = [
   "text/csv",
@@ -194,6 +195,7 @@ export async function POST(request: Request) {
     ).length;
     const total_alerts = processed_alerts.length;
 
+    const { setStoredAlerts } = await import("@/app/api/alerts/store");
     setStoredAlerts(processed_alerts);
 
     const response: UploadAlertsResponse = {
