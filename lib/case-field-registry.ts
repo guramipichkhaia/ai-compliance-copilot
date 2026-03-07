@@ -41,7 +41,7 @@ export const caseFieldRegistry: Record<string, { title: string; fields: CaseFiel
   corridorBeneficiary: {
     title: "Corridor & Beneficiary Risk",
     fields: [
-      { key: "firstTimeCountry", label: "First-time country", type: "boolean" },
+      { key: "firstTimeCountry", label: "First time country", type: "boolean" },
       { key: "firstTimeBeneficiary", label: "First-time beneficiary", type: "boolean" },
       { key: "destinationJurisdictionRiskTier", label: "Destination Jurisdiction Risk Tier", type: "enum", options: ["Low", "Medium", "Elevated (FATF monitored)", "High"] },
     ],

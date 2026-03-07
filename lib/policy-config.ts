@@ -34,7 +34,7 @@ const PREDEFINED_DEFAULTS: Record<
   elevated_risk_jurisdiction: { name: "Elevated-risk jurisdiction", fieldKey: "destinationJurisdictionRiskTier", operator: "gte", threshold: "Elevated (FATF monitored)", critical: true },
   rapid_movement: { name: "Rapid movement (hours)", fieldKey: "rapidMovementHours", operator: "<", threshold: 72, critical: true },
   documentation_gap: { name: "Documentation gap", fieldKey: "documentationGap", operator: "boolean_true", threshold: true, critical: false },
-  corridor_novelty: { name: "First-time country", fieldKey: "firstTimeCountry", operator: "boolean_true", threshold: true, critical: false },
+  corridor_novelty: { name: "First time country", fieldKey: "firstTimeCountry", operator: "boolean_true", threshold: true, critical: false },
   risk_rating_elevated: { name: "Risk Rating Elevated", fieldKey: "riskRatingElevated", operator: "boolean_true", threshold: true, critical: false },
   velocity_spike: { name: "Velocity Spike (7d multiple)", fieldKey: "velocity7dMultiple", operator: ">", threshold: 3, critical: false },
   concentration_risk: { name: "Concentration Risk (%)", fieldKey: "concentrationPercent", operator: ">", threshold: 50, critical: false },

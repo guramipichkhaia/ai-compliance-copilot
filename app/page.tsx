@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { getPolicyConfig, getDefaultPolicyConfig, type PolicyConfig } from "@/lib/policy-config";
 import { evaluateTrigger } from "@/lib/rule-evaluator";
 import { getCards, type CaseFieldDef } from "@/lib/case-field-registry";
+import { getTemplateCsvContent } from "@/lib/aml-alert-upload-schema";
+import type { ProcessedAlert } from "@/app/api/upload-alerts/route";
+import { getCaseDataFromUploadedAlert } from "@/lib/alert-evaluator";
 
 type RiskLevel = "High" | "Medium" | "Low";
 
@@ -22,6 +25,68 @@ interface Alert {
   counterpartyCountry: string;
   description: string;
   riskLevel: AlertRiskLevel;
+}
+
+/** Imported alert normalized to Alert shape so existing UI works unchanged. */
+type DisplayAlert = Alert & {
+  raw_alert?: ProcessedAlert["raw_alert"];
+  triggers?: ProcessedAlert["triggers"];
+  triggers_met_count?: number;
+  escalation_recommended?: boolean;
+  evaluation_timestamp?: string;
+  policy_version?: string;
+};
+
+function toDisplayAlert(p: ProcessedAlert): DisplayAlert {
+  const r = p.raw_alert;
+  const title = r.alert_title != null && r.alert_title !== "" ? r.alert_title : `Alert ${r.alert_id}`;
+  const description = r.alert_description != null && r.alert_description !== "" ? r.alert_description : "";
+  return {
+    id: r.alert_id,
+    title,
+    entityName: r.customer_name ?? "",
+    entityId: r.customer_id ?? "",
+    type: r.transaction_type,
+    date: r.transaction_date ?? "",
+    amount: typeof r.transaction_amount === "number" && !Number.isNaN(r.transaction_amount)
+      ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(r.transaction_amount)
+      : "",
+    counterpartyCountry: r.beneficiary_country ?? "",
+    description,
+    riskLevel: "High",
+    raw_alert: r,
+    triggers: p.triggers,
+    triggers_met_count: p.triggers_met_count,
+    escalation_recommended: p.escalation_recommended,
+    evaluation_timestamp: p.evaluation_timestamp,
+    policy_version: p.policy_version,
+  };
+}
+
+function isImportedAlert(a: DisplayAlert): a is DisplayAlert & { raw_alert: ProcessedAlert["raw_alert"]; triggers: ProcessedAlert["triggers"] } {
+  return a.raw_alert != null && a.triggers != null;
+}
+
+/** Build AnalysisResult for an imported alert so Summary tab and escalation block render with alert-specific values. */
+function buildAnalysisFromImportedAlert(alert: DisplayAlert): AnalysisResult {
+  const recommended = alert.escalation_recommended ? "Escalate to Enhanced Due Diligence" : "Consider for dismissal pending review";
+  const riskRec = alert.escalation_recommended ? "High" : "Medium";
+  const metCount = alert.triggers_met_count ?? 0;
+  const totalCount = alert.triggers?.length ?? 0;
+  return {
+    ...FAKE_ANALYSIS,
+    risk_recommendation: riskRec as RiskLevel,
+    recommended_action: recommended,
+    case_overview: alert.description && alert.description.trim() !== ""
+      ? alert.description
+      : `Alert ${alert.id}: outbound ${alert.type} of ${alert.amount} to ${alert.counterpartyCountry}. Triggers met: ${metCount} of ${totalCount}. ${alert.escalation_recommended ? "Escalation recommended." : "Below escalation threshold."}`,
+    executive_decision_summary: alert.escalation_recommended
+      ? "Trigger evaluation supports escalation."
+      : "Trigger evaluation below escalation threshold.",
+    executive_ai_conclusion: alert.escalation_recommended
+      ? "This alert presents material AML risk requiring escalation."
+      : "Risk indicators present but below internal escalation threshold.",
+  };
 }
 
 interface RiskSignal {
@@ -598,7 +663,7 @@ function getTriggerConditionDescription(
     return met ? "condition satisfied" : "condition not satisfied";
   }
   if (fieldKey === "firstTimeCountry" || fieldKey === "corridorNovelty") {
-    return met ? "First-time country: Yes" : "First-time country: No";
+    return met ? "First time country: Yes" : "First time country: No";
   }
   if (fieldKey === "destinationJurisdictionRiskTier") {
     return met ? "country on FATF high-risk list" : "destination not on FATF high-risk list";
@@ -1047,7 +1112,7 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analyzedResults, setAnalyzedResults] = useState<Record<string, AnalysisResult>>({});
-  const [activeTab, setActiveTab] = useState<"Summary" | "Initial Escalation Record" | "Other">("Summary");
+  const [activeTab, setActiveTab] = useState<"Summary" | "Initial Escalation Record">("Summary");
   const [sarTechnicalDrawerOpen, setSarTechnicalDrawerOpen] = useState(false);
   const [sarNarrativeDraft, setSarNarrativeDraft] = useState("");
   const [caseNarrativeDraft, setCaseNarrativeDraft] = useState("");
@@ -1096,8 +1161,17 @@ export default function Home() {
   const [viewEscalationModalOpen, setViewEscalationModalOpen] = useState(false);
   const [caseStatusTransitionHistory, setCaseStatusTransitionHistory] = useState<CaseStatusTransition[]>([]);
   const [policyConfig, setPolicyConfig] = useState<PolicyConfig>(getDefaultPolicyConfig());
+  const [importDrawerOpen, setImportDrawerOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvUploading, setCsvUploading] = useState(false);
+  const [processedAlerts, setProcessedAlerts] = useState<ProcessedAlert[]>([]);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
 
-  const selectedAlert = ALERTS.find((a) => a.id === selectedAlertId);
+  const alertList: DisplayAlert[] = [
+    ...ALERTS,
+    ...processedAlerts.map(toDisplayAlert),
+  ];
+  const selectedAlert = alertList.find((a) => a.id === selectedAlertId) ?? null;
 
   useEffect(() => {
     setPolicyConfig(getPolicyConfig());
@@ -1125,8 +1199,15 @@ export default function Home() {
 
   /* Sync detail pane when selected alert or analyzed results change */
   useEffect(() => {
-    if (selectedAlertId && analyzedResults[selectedAlertId]) setAnalysis(analyzedResults[selectedAlertId]);
-  }, [selectedAlertId, analyzedResults]);
+    if (!selectedAlertId || !selectedAlert) return;
+    if (isImportedAlert(selectedAlert)) {
+      const synthetic = buildAnalysisFromImportedAlert(selectedAlert);
+      setAnalysis(synthetic);
+      setAnalyzedResults((prev) => ({ ...prev, [selectedAlert.id]: synthetic }));
+    } else if (analyzedResults[selectedAlertId]) {
+      setAnalysis(analyzedResults[selectedAlertId]);
+    }
+  }, [selectedAlertId, selectedAlert, analyzedResults]);
 
   /* Regenerate Case Narrative Draft when selected alert changes */
   useEffect(() => {
@@ -1151,7 +1232,7 @@ export default function Home() {
     setCaseNarrativeDraft(narrative);
   }, [selectedAlertId, selectedAlert]);
 
-  const totalAlerts = ALERTS.length;
+  const totalAlerts = alertList.length;
 
   /* Seed audit log and SAR draft when analysis is first available */
   useEffect(() => {
@@ -1386,7 +1467,7 @@ export default function Home() {
     } else if (hasFirstTimeBeneficiary) {
       driverParts.push("The beneficiary is a first-time counterparty");
     } else if (hasFirstTimeCountry) {
-      driverParts.push(`First-time country exposure (no prior transactions to ${country})`);
+      driverParts.push(`First time country exposure (no prior transactions to ${country})`);
     }
     if (hasDocGap) {
       driverParts.push(driverParts.length > 0 ? "supporting documentation for the stated trade purpose has not been provided" : "Supporting documentation for the stated trade purpose has not been provided");
@@ -1448,7 +1529,7 @@ export default function Home() {
       primaryRiskDrivers.push(`Prior SAR or alert history (${NETWORK_EXPOSURE.thoseAlertsEscalatedOrSarFiled} prior alerts escalated or SAR filed for this beneficiary)`);
     }
     if (CORRIDOR_CONTEXT.firstTimeCountry) {
-      primaryRiskDrivers.push(`First-time country exposure (no prior transactions to ${country})`);
+      primaryRiskDrivers.push(`First time country exposure (no prior transactions to ${country})`);
     }
     const primary = primaryRiskDrivers.slice(0, 6);
 
@@ -1602,6 +1683,45 @@ export default function Home() {
     setOverrideJustification("");
   };
 
+  const downloadCsvTemplate = () => {
+    const content = getTemplateCsvContent();
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "AML_Alerts_Template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCsvFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setCsvFile(file ?? null);
+  };
+
+  const handleImportClick = async () => {
+    if (!csvFile) return;
+    setCsvUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", csvFile);
+      const res = await fetch("/api/upload-alerts", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ show: true, message: data.error ?? "Upload failed" });
+        return;
+      }
+      if (data.ok && Array.isArray(data.processed_alerts)) {
+        setProcessedAlerts((prev) => [...prev, ...data.processed_alerts]);
+        setImportDrawerOpen(false);
+        setCsvFile(null);
+        setToast({ show: true, message: `Imported ${data.processed_alerts.length} alert(s). They appear below your existing alerts.` });
+      }
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
   return (
     <div className="flex min-h-screen w-full flex-col bg-neutral-100 font-sans text-neutral-800">
       {/* Top navigation */}
@@ -1615,6 +1735,16 @@ export default function Home() {
           </span>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setImportDrawerOpen(true);
+              setCsvFile(null);
+            }}
+            className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+          >
+            Import Alerts
+          </button>
           <Link
             href="/policy-config"
             className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
@@ -1738,20 +1868,24 @@ export default function Home() {
 
         <ul className="flex-1 overflow-y-auto p-3">
           {(() => {
-            const currentAmt = selectedAlert ? parseAmount(selectedAlert.amount) : undefined;
-            const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmt, policyConfig);
-            const escalationLikely = triggers.filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate;
-            const filteredAlerts = ALERTS.filter((alert) => {
+            const selectedEscalationLikely = selectedAlert
+              ? (isImportedAlert(selectedAlert)
+                  ? (selectedAlert.escalation_recommended ?? false)
+                  : getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, parseAmount(selectedAlert.amount), policyConfig).filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate)
+              : false;
+            const filteredAlerts = alertList.filter((alert) => {
+              const escalationForFilter = isImportedAlert(alert) ? alert.escalation_recommended : (() => {
+                const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, parseAmount(alert.amount), policyConfig);
+                return triggers.filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate;
+              })();
               const matchRecommendation =
                 recommendationFilter === "All" ||
-                (recommendationFilter === "Escalate" && escalationLikely) ||
-                (recommendationFilter === "Dismiss" && !escalationLikely);
+                (recommendationFilter === "Escalate" && escalationForFilter) ||
+                (recommendationFilter === "Dismiss" && !escalationForFilter);
               const status = alertStatuses[alert.id] ?? "Open";
               const matchStatus = statusFilter === "All" || status === statusFilter;
               return matchRecommendation && matchStatus;
             });
-            const triggersMet = triggers.filter((t) => t.met).length;
-            const triggersTotal = triggers.length;
             return filteredAlerts.map((alert) => {
             const cardAnalysis = analyzedResults[alert.id];
             const isSelected = selectedAlertId === alert.id;
@@ -1764,10 +1898,24 @@ export default function Home() {
                   : alertStatus === "Dismissed" || alertStatus === "Overridden" || alertStatus === "Closed"
                     ? "bg-neutral-100 text-neutral-800 border-neutral-300"
                     : "bg-neutral-50 text-neutral-500 border-neutral-200";
-            const aiAssessmentBadge = cardAnalysis ? (
+            const isImported = isImportedAlert(alert);
+            const escalationBadge = isImported ? alert.escalation_recommended : (() => {
+              const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, parseAmount(alert.amount), policyConfig);
+              return triggers.filter((t) => t.met).length >= policyConfig.minRegularTriggersToEscalate;
+            })();
+            const triggersMet = isImported ? (alert.triggers_met_count ?? 0) : (() => {
+              const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, parseAmount(alert.amount), policyConfig);
+              return triggers.filter((t) => t.met).length;
+            })();
+            const triggersTotal = isImported ? (alert.triggers?.length ?? 0) : (() => {
+              const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, parseAmount(alert.amount), policyConfig);
+              return triggers.length;
+            })();
+            const showBadge = isImported || cardAnalysis;
+            const aiAssessmentBadge = showBadge ? (
               <div className="absolute top-2 right-2 text-right">
-                <span className={`inline-block rounded px-2 py-1 text-xs font-semibold ${escalationLikely ? "bg-red-600 text-white" : "bg-neutral-500 text-white"}`}>
-                  {escalationLikely ? "ESCALATE" : "Dismiss"}
+                <span className={`inline-block rounded px-2 py-1 text-xs font-semibold ${escalationBadge ? "bg-red-600 text-white" : "bg-neutral-500 text-white"}`}>
+                  {escalationBadge ? "ESCALATE" : "Dismiss"}
                 </span>
                 <span className="block mt-1 text-[10px] text-neutral-400">Triggers: {triggersMet} / {triggersTotal}</span>
               </div>
@@ -1828,10 +1976,10 @@ export default function Home() {
                   <p className="text-sm text-neutral-600 mt-0.5">{selectedAlert.entityName} ({selectedAlert.entityId})</p>
                 </div>
                 {(() => {
-                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig);
-                  const triggersMet = triggers.filter((t) => t.met).length;
-                  const triggersTotal = triggers.length;
-                  const escalationLikely = triggersMet >= policyConfig.minRegularTriggersToEscalate;
+                  const imported = isImportedAlert(selectedAlert);
+                  const triggersMet = imported ? (selectedAlert.triggers_met_count ?? 0) : getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig).filter((t) => t.met).length;
+                  const triggersTotal = imported ? (selectedAlert.triggers?.length ?? 0) : getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, selectedAlert ? parseAmount(selectedAlert.amount) : undefined, policyConfig).length;
+                  const escalationLikely = imported ? (selectedAlert.escalation_recommended ?? false) : triggersMet >= policyConfig.minRegularTriggersToEscalate;
                   return (
                     <div className="text-right shrink-0">
                       <span className={`rounded px-2.5 py-0.5 text-xs font-bold text-white ${escalationLikely ? "bg-red-600" : "bg-neutral-500"}`}>
@@ -1891,7 +2039,7 @@ export default function Home() {
             </div>
 
             {/* AI Risk Intelligence — compact, below alert, above tabs; buttons, recommendation, UI + Policy Escalation Mapping */}
-            {analysis && (
+            {analysis && selectedAlert && (
               <section
                 className={`rounded-xl border border-neutral-200 border-l-4 bg-white p-3 shadow-md ${
                   analysis.risk_recommendation === "High"
@@ -1903,15 +2051,50 @@ export default function Home() {
               >
                 {/* ESCALATION STATUS — within card; buttons on same row */}
                 {(() => {
-                  const evaluatedAt = new Date();
-                  const currentAmount = selectedAlert ? parseAmount(selectedAlert.amount) : undefined;
-                  const triggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmount, policyConfig);
+                  const imported = isImportedAlert(selectedAlert);
+                  const evaluatedAt = imported && selectedAlert.evaluation_timestamp
+                    ? new Date(selectedAlert.evaluation_timestamp)
+                    : new Date();
+                  const policyVersion = (imported && selectedAlert.policy_version) ? selectedAlert.policy_version : "v1.0";
+
+                  let triggers: PolicyTrigger[];
+                  let metCount: number;
+                  let triggersLength: number;
+                  let thresholdMet: boolean;
+                  let recommendation: string;
+
+                  if (imported && selectedAlert.triggers?.length) {
+                    triggers = selectedAlert.triggers.map((t) => ({
+                      id: t.triggerId,
+                      fieldKey: t.triggerId,
+                      label: t.triggerName,
+                      met: t.result === "Met",
+                      isCritical: t.severity === "Critical",
+                      observedValue: String(t.observed_value),
+                      policyRuleLabel: String(t.threshold_value),
+                      resultLabel: t.result as "Met" | "Not Met",
+                      conditionDescription: "",
+                    }));
+                    metCount = selectedAlert.triggers_met_count ?? 0;
+                    triggersLength = selectedAlert.triggers.length;
+                    const criticalMet = selectedAlert.triggers.filter((t) => t.severity === "Critical" && t.result === "Met").length;
+                    const regularMet = selectedAlert.triggers.filter((t) => t.severity === "Regular" && t.result === "Met").length;
+                    thresholdMet = criticalMet >= 1 || regularMet >= (policyConfig.minRegularTriggersToEscalate ?? 4);
+                    recommendation = selectedAlert.escalation_recommended ? "Escalate" : "Dismiss";
+                  } else {
+                    const currentAmount = parseAmount(selectedAlert.amount);
+                    const policyTriggers = getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, currentAmount, policyConfig);
+                    triggers = policyTriggers;
+                    metCount = policyTriggers.filter((t) => t.met).length;
+                    triggersLength = policyTriggers.length;
+                    const criticalTriggers = policyTriggers.filter((t) => t.isCritical);
+                    const regularTriggers = policyTriggers.filter((t) => !t.isCritical);
+                    thresholdMet = metCount >= policyConfig.minRegularTriggersToEscalate || criticalTriggers.filter((t) => t.met).length > 0;
+                    recommendation = getPolicyEscalationRecommendation(policyTriggers, policyConfig);
+                  }
+
                   const criticalTriggers = triggers.filter((t) => t.isCritical);
                   const regularTriggers = triggers.filter((t) => !t.isCritical);
-                  const metCount = triggers.filter((t) => t.met).length;
-                  const criticalMetCount = criticalTriggers.filter((t) => t.met).length;
-                  const thresholdMet = metCount >= policyConfig.minRegularTriggersToEscalate || criticalMetCount > 0;
-                  const recommendation = getPolicyEscalationRecommendation(triggers, policyConfig);
                   const renderTriggerTable = (list: PolicyTrigger[]) => (
                     <table className="w-full min-w-[320px] text-sm">
                       <thead>
@@ -1980,7 +2163,7 @@ export default function Home() {
                         ])}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
-                        <span className="font-medium text-neutral-800">Triggers met: {metCount} of {triggers.length}</span>
+                        <span className="font-medium text-neutral-800">Triggers met: {metCount} of {triggersLength}</span>
                         <span className="text-neutral-500">·</span>
                         <span className="text-neutral-600">Policy escalation threshold: <span className="font-medium text-neutral-900 tabular-nums">{policyConfig.minRegularTriggersToEscalate}</span></span>
                         <span className="text-neutral-500">·</span>
@@ -1993,7 +2176,7 @@ export default function Home() {
                           : ` (fewer than ${policyConfig.minRegularTriggersToEscalate} regular triggers and no critical trigger met).`}
                       </p>
                       <div className="mt-3 flex justify-end gap-4 text-[10px] text-neutral-400">
-                        <span>Policy version: v1.0</span>
+                        <span>Policy version: {policyVersion}</span>
                         <span>Evaluated at: {evaluatedAt.toLocaleString()}</span>
                       </div>
                     </div>
@@ -2002,7 +2185,7 @@ export default function Home() {
               </section>
             )}
 
-            {/* Tabs: Summary | Initial Escalation Record | Other (SAR Filing + other sections) */}
+            {/* Tabs: Summary | Initial Escalation Record */}
             <div className="mt-4 w-full border-b border-neutral-200">
               <div className="flex px-4">
                 <button
@@ -2022,15 +2205,6 @@ export default function Home() {
                   onClick={() => setActiveTab("Initial Escalation Record")}
                 >
                   Initial Escalation Record
-                </button>
-                <button
-                  type="button"
-                  className={`px-6 py-3 text-sm font-medium transition-colors ${
-                    activeTab === "Other" ? "border-b-2 border-blue-600 text-blue-600" : "text-neutral-600 hover:text-neutral-900"
-                  }`}
-                  onClick={() => setActiveTab("Other")}
-                >
-                  Other
                 </button>
               </div>
             </div>
@@ -2066,19 +2240,19 @@ export default function Home() {
                       <p className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Subject Profile</p>
                       <ul className="text-sm text-neutral-800 space-y-1.5 list-none">
                         <li><span className="text-neutral-500">Name / ID:</span> {selectedAlert.entityName} ({selectedAlert.entityId})</li>
-                        <li><span className="text-neutral-500">Type:</span> Corporate (Freight &amp; Logistics)</li>
-                        <li><span className="text-neutral-500">Business / Occupation:</span> Import/export trading</li>
-                        <li><span className="text-neutral-500">Account Age:</span> 18 months</li>
-                        <li><span className="text-neutral-500">Normal Activity:</span> Avg monthly outbound $15k–$20k, mostly wires/ACH</li>
+                        <li><span className="text-neutral-500">Type:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.subject_type != null && selectedAlert.raw_alert.subject_type !== "" ? selectedAlert.raw_alert.subject_type : "Corporate (Freight &amp; Logistics)"}</li>
+                        <li><span className="text-neutral-500">Business / Occupation:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.subject_business_occupation != null && selectedAlert.raw_alert.subject_business_occupation !== "" ? selectedAlert.raw_alert.subject_business_occupation : "Import/export trading"}</li>
+                        <li><span className="text-neutral-500">Account Age:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.subject_account_age_months != null ? `${selectedAlert.raw_alert.subject_account_age_months} months` : "18 months"}</li>
+                        <li><span className="text-neutral-500">Normal Activity:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.subject_normal_activity != null && selectedAlert.raw_alert.subject_normal_activity !== "" ? selectedAlert.raw_alert.subject_normal_activity : "Avg monthly outbound $15k–$20k, mostly wires/ACH"}</li>
                       </ul>
                     </div>
                     <div>
                       <p className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Recipient Profile</p>
                       <ul className="text-sm text-neutral-800 space-y-1.5 list-none">
-                        <li><span className="text-neutral-500">Name:</span> Mediterranean Trade Partners</li>
-                        <li><span className="text-neutral-500">Account:</span> CY9876543210 (Bank of Cyprus)</li>
-                        <li><span className="text-neutral-500">Country:</span> Cyprus (FATF High-Risk)</li>
-                        <li><span className="text-neutral-500">Relationship:</span> No prior transactions (first-time beneficiary)</li>
+                        <li><span className="text-neutral-500">Name:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.beneficiary_name != null && selectedAlert.raw_alert.beneficiary_name !== "" ? selectedAlert.raw_alert.beneficiary_name : "Mediterranean Trade Partners"}</li>
+                        <li><span className="text-neutral-500">Account:</span> {isImportedAlert(selectedAlert) && (selectedAlert.raw_alert?.recipient_account_id != null || selectedAlert.raw_alert?.recipient_account_bank != null) ? `${selectedAlert.raw_alert.recipient_account_id ?? ""}${selectedAlert.raw_alert.recipient_account_bank ? ` (${selectedAlert.raw_alert.recipient_account_bank})` : ""}`.trim() || "—" : "CY9876543210 (Bank of Cyprus)"}</li>
+                        <li><span className="text-neutral-500">Country:</span> {selectedAlert.counterpartyCountry}{selectedAlert.counterpartyCountry ? " (FATF High-Risk)" : ""}</li>
+                        <li><span className="text-neutral-500">Relationship:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.first_time_beneficiary === true ? "No prior transactions (first-time beneficiary)" : isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.first_time_beneficiary === false ? "Prior transaction history exists" : "No prior transactions (first-time beneficiary)"}</li>
                       </ul>
                     </div>
                   </div>
@@ -2086,19 +2260,28 @@ export default function Home() {
 
                 {/* Transaction Deviation Analysis */}
                 {selectedAlert && (() => {
-                  const currentAmount = parseAmount(selectedAlert.amount);
-                  const avg90 = BASELINE_VERIFICATION.avgOutboundWire90d;
-                  // Multiple: Current ÷ 90-Day Average (used for display and trigger)
+                  const imported = isImportedAlert(selectedAlert);
+                  const currentAmount = imported && selectedAlert.raw_alert && typeof selectedAlert.raw_alert.transaction_amount === "number"
+                    ? selectedAlert.raw_alert.transaction_amount
+                    : parseAmount(selectedAlert.amount);
+                  const avg90 = imported && selectedAlert.raw_alert && typeof selectedAlert.raw_alert.outbound_90d_avg === "number"
+                    ? selectedAlert.raw_alert.outbound_90d_avg
+                    : BASELINE_VERIFICATION.avgOutboundWire90d;
                   const multipleVsAvg = avg90 > 0 ? currentAmount / avg90 : 0;
                   const triggerMet = avg90 > 0 && multipleVsAvg >= 2.0;
-                  const prior6moMax = Math.max(...HISTORICAL_OUTBOUND_MONTHS.map((m) => m.largestSingle));
+                  const prior6moMax = imported && selectedAlert.raw_alert && typeof selectedAlert.raw_alert.prior_6m_max_transaction === "number"
+                    ? selectedAlert.raw_alert.prior_6m_max_transaction
+                    : Math.max(...HISTORICAL_OUTBOUND_MONTHS.map((m) => m.largestSingle));
+                  const amountDisplay = imported && selectedAlert.raw_alert && typeof selectedAlert.raw_alert.transaction_amount === "number"
+                    ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(selectedAlert.raw_alert.transaction_amount)
+                    : selectedAlert.amount;
                   return (
                     <section className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
                       <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
                         Transaction Deviation Analysis
                       </h3>
                       <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
-                        <div><dt className="text-neutral-500">Current Transaction Amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{selectedAlert.amount}</dd></div>
+                        <div><dt className="text-neutral-500">Current Transaction Amount</dt><dd className="font-medium text-neutral-900 tabular-nums">{amountDisplay}</dd></div>
                         <div><dt className="text-neutral-500">90-Day Average Outbound Amount</dt><dd className="font-medium text-neutral-900 tabular-nums">${avg90.toLocaleString()}</dd></div>
                         <div><dt className="text-neutral-500">Transaction Multiple vs 90-Day Average</dt><dd className="font-medium text-neutral-900 tabular-nums">{multipleVsAvg.toFixed(1)}×</dd></div>
                         <div><dt className="text-neutral-500">Prior 6-Month Maximum Transaction</dt><dd className="font-medium text-neutral-900 tabular-nums">${prior6moMax.toLocaleString()}</dd></div>
@@ -2116,7 +2299,10 @@ export default function Home() {
 
                 {/* Registry-driven alert detail cards (single source of truth with policy field picker) */}
                 {(() => {
-                  /** Map trigger fieldKey (including backward-compat aliases) to registry field key so triggers show on the correct card. */
+                  const imported = isImportedAlert(selectedAlert);
+                  const caseData = imported && selectedAlert.raw_alert
+                    ? getCaseDataFromUploadedAlert(selectedAlert.raw_alert)
+                    : buildCaseDataForEvaluation(selectedAlert ? parseAmount(selectedAlert.amount) : undefined);
                   const triggerFieldKeyToRegistryKey: Record<string, string> = {
                     rapidMovementHours: "timeGapHours",
                     velocity7dMultiple: "spikeMultiple7d",
@@ -2125,12 +2311,32 @@ export default function Home() {
                     concentrationPercent: "pctOutboundVolumeJurisdiction90d",
                     negativeMediaRisk: "adverseMediaIndicator",
                   };
-                  const caseData = buildCaseDataForEvaluation(selectedAlert ? parseAmount(selectedAlert.amount) : undefined);
-                  const policyTriggers = getPolicyEscalationTriggers(
-                    SOURCE_OF_FUNDS.timeGapHours,
-                    selectedAlert ? parseAmount(selectedAlert.amount) : undefined,
-                    policyConfig
-                  );
+                  /** Evaluator trigger IDs that don't match policy id (e.g. first_time_country vs corridor_novelty) map to registry fieldKey for card matching. */
+                  const evaluatorTriggerIdToFieldKey: Record<string, string> = {
+                    first_time_country: "firstTimeCountry",
+                    baseline_deviation: "baselineDeviation",
+                  };
+                  const policyTriggers = imported && selectedAlert.triggers?.length
+                    ? selectedAlert.triggers.map((t) => {
+                        const tc = policyConfig.triggers.find((p) => p.id === t.triggerId);
+                        const fieldKey = tc?.fieldKey ?? evaluatorTriggerIdToFieldKey[t.triggerId] ?? t.triggerId;
+                        return {
+                          id: t.triggerId,
+                          fieldKey,
+                          label: t.triggerName,
+                          met: t.result === "Met",
+                          isCritical: t.severity === "Critical",
+                          observedValue: String(t.observed_value ?? "—"),
+                          policyRuleLabel: String(t.threshold_value ?? "—"),
+                          resultLabel: t.result as "Met" | "Not Met",
+                          conditionDescription: t.result === "Met" ? "condition satisfied" : "condition not satisfied",
+                        };
+                      })
+                    : getPolicyEscalationTriggers(
+                        SOURCE_OF_FUNDS.timeGapHours,
+                        selectedAlert ? parseAmount(selectedAlert.amount) : undefined,
+                        policyConfig
+                      );
                   return getCards().map((card) => {
                     const cardFieldKeys = new Set(card.fields.map((f) => f.key));
                     const triggersForCard = policyTriggers.filter((t) => {
@@ -2171,291 +2377,6 @@ export default function Home() {
                   });
                 })()}
 
-                </>
-              )}
-
-              {activeTab === "Other" && analysis && (
-                <>
-                {/* Business Behavior Alignment — expected (KYC) vs observed (72–90d) */}
-                {(() => {
-                  const declared90dRevenue = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
-                  const revenuePct90d = declared90dRevenue > 0 ? (BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow / declared90dRevenue) * 100 : 0;
-                  const mismatchCount = BUSINESS_BEHAVIOR_ROWS.filter((r) => !r.match).length;
-                  const revenueWarning = revenuePct90d >= REVENUE_EXPOSURE_RED_PCT ? "red" : revenuePct90d >= REVENUE_EXPOSURE_AMBER_PCT ? "amber" : null;
-                  return (
-                    <section className="rounded-lg border border-neutral-200 bg-white shadow-sm">
-                      <h3 className="border-b border-neutral-100 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Business Behavior Alignment
-                      </h3>
-                      <p className="px-4 pt-3 text-xs text-neutral-500">
-                        Expected vs Observed (last 72–90 days)
-                      </p>
-                      <div className="p-4">
-                        <div className="overflow-hidden rounded border border-neutral-200">
-                          <table className="w-full text-xs">
-                            <thead>
-                              <tr className="border-b border-neutral-200 bg-neutral-50">
-                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Dimension</th>
-                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Expected (from KYC/onboarding)</th>
-                                <th className="px-3 py-2 text-left font-medium text-neutral-600">Observed (last 72–90 days)</th>
-                                <th className="px-3 py-2 text-center font-medium text-neutral-600 w-16">Match</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {BUSINESS_BEHAVIOR_ROWS.map((row, i) => (
-                                <tr key={i} className="border-b border-neutral-100 last:border-0">
-                                  <td className="px-3 py-2 font-medium text-neutral-700">{row.dimension}</td>
-                                  <td className="px-3 py-2 text-neutral-600">{row.expected}</td>
-                                  <td className="px-3 py-2 text-neutral-700">{row.observed}</td>
-                                  <td className="px-3 py-2 text-center">
-                                    {row.match ? <span className="text-emerald-600" aria-label="Match">✓</span> : <span className="text-red-600" aria-label="Mismatch">✗</span>}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="mt-4">
-                          <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Revenue exposure</h4>
-                          {(() => {
-                            const expected90 = BUSINESS_BEHAVIOR_REVENUE.declaredMonthlyRevenue * BUSINESS_BEHAVIOR_REVENUE.windowMonths;
-                            const observed90 = BUSINESS_BEHAVIOR_REVENUE.totalDepositedInWindow;
-                            const diff = observed90 - expected90;
-                            return (
-                              <dl className="grid grid-cols-1 gap-1 text-xs sm:grid-cols-[auto_1fr] sm:gap-x-4">
-                                <dt className="text-neutral-600">Expected 90-day revenue:</dt>
-                                <dd className="font-medium text-neutral-800 tabular-nums">${expected90.toLocaleString()}</dd>
-                                <dt className="text-neutral-600">Observed 90-day deposits:</dt>
-                                <dd className="font-medium text-neutral-800 tabular-nums">${observed90.toLocaleString()}</dd>
-                                <dt className="text-neutral-600">Difference:</dt>
-                                <dd className="font-medium tabular-nums">{diff >= 0 ? "+" : ""}${Math.abs(diff).toLocaleString()}</dd>
-                                <dt className="text-neutral-600">Status:</dt>
-                                <dd className="font-medium text-neutral-800">{diff > 0 ? "Exceeds expected revenue" : diff < 0 ? "Below expected revenue" : "In line with expected revenue"}</dd>
-                              </dl>
-                            );
-                          })()}
-                          <p className="mt-2 text-xs text-neutral-600">
-                            {revenueWarning === "red" ? (
-                              <span className="text-red-600 font-medium">{revenuePct90d.toFixed(0)}% of declared 90-day revenue (high exposure)</span>
-                            ) : revenueWarning === "amber" ? (
-                              <span className="text-neutral-700">{revenuePct90d.toFixed(0)}% of declared 90-day revenue (elevated exposure)</span>
-                            ) : (
-                              <>{revenuePct90d.toFixed(0)}% of declared 90-day revenue</>
-                            )}
-                          </p>
-                        </div>
-                        <div className="mt-4 pt-3 border-t border-neutral-200">
-                          <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">Alignment Conclusion</h4>
-                          <ul className="text-sm text-neutral-700 space-y-1 list-disc list-inside">
-                            <li>{mismatchCount} of {BUSINESS_BEHAVIOR_ROWS.length} behavioral dimensions inconsistent with declared business profile.</li>
-                            <li>Deposits materially exceed expected frequency and size.</li>
-                            <li>90-day deposits represent {revenuePct90d.toFixed(0)}% of declared 90-day revenue.</li>
-                          </ul>
-                          <p className="mt-2 text-sm font-bold text-neutral-900">
-                            Conclusion: Behavior inconsistent with KYC profile. Escalation criteria met.
-                          </p>
-                        </div>
-                      </div>
-                    </section>
-                  );
-                })()}
-
-                {/* Risk Sensitivity Analysis — simulated impact */}
-                <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-md">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Risk Sensitivity Analysis
-                  </h3>
-                  <p className="mt-2 text-sm text-neutral-600">
-                    Simulated impact on risk score if specific drivers were
-                    mitigated.
-                  </p>
-                  <div className="mt-4 space-y-4">
-                    {RISK_SENSITIVITY.map((item, i) => (
-                      <div
-                        key={i}
-                        className="rounded-lg border border-neutral-100 p-4 transition-shadow duration-200 hover:shadow-md"
-                      >
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="text-sm font-medium text-neutral-900">
-                            {item.factor}
-                          </span>
-                          <span className="text-sm font-semibold tabular-nums text-red-600">
-                            {item.delta} points
-                          </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span className="text-xs text-neutral-500">
-                            Projected score:
-                          </span>
-                          <span className="text-sm font-bold tabular-nums text-neutral-900">
-                            {item.projected_score}%
-                          </span>
-                        </div>
-                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-neutral-100">
-                          <div
-                            className="h-full rounded-full bg-blue-600 transition-all duration-300"
-                            style={{
-                              width: `${item.projected_score}%`,
-                            }}
-                          />
-                        </div>
-                        <p className="mt-2 text-xs leading-snug text-neutral-600">
-                          {item.explanation}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                {/* Decision Defensibility */}
-                <section className="rounded-xl border border-neutral-200 bg-white p-6 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Decision defensibility
-                  </h3>
-
-                  <div className="mt-5 space-y-6">
-                    <div>
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
-                        Key assumptions behind escalation
-                      </h4>
-                      <ul className="mt-3 space-y-2">
-                        <li className="text-sm text-neutral-700">
-                          Transaction velocity materially exceeds historical
-                          baseline
-                        </li>
-                        <li className="text-sm text-neutral-700">
-                          Counterparty jurisdictions are correctly classified as
-                          high-risk
-                        </li>
-                        <li className="text-sm text-neutral-700">
-                          No documented legitimate business explanation
-                          currently supports the pattern
-                        </li>
-                      </ul>
-                    </div>
-
-                    <div>
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
-                        Material data gaps affecting confidence
-                      </h4>
-                      <ul className="mt-3 space-y-2">
-                        <li className="text-sm text-neutral-700">
-                          Incomplete beneficial ownership data for key
-                          counterparties
-                        </li>
-                        <li className="text-sm text-neutral-700">
-                          Limited historical transaction baseline (account age{" "}
-                          {"<"} 24 months)
-                        </li>
-                      </ul>
-                    </div>
-
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
-                        Evidence required to de-escalate
-                      </h4>
-                      <ul className="mt-3 space-y-2">
-                        <li className="text-sm text-neutral-700">
-                          Verified documentation supporting legitimate
-                          trade-finance activity
-                        </li>
-                        <li className="text-sm text-neutral-700">
-                          Enhanced due diligence clearance on counterparties
-                        </li>
-                        <li className="text-sm text-neutral-700">
-                          Independent validation of stated business purpose
-                        </li>
-                      </ul>
-                    </div>
-                  </div>
-                </section>
-
-                <TopRiskDrivers />
-
-                {/* Cross-Case Intelligence */}
-                <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    Cross-Case Intelligence
-                  </h3>
-                  <p className="mt-3 text-sm leading-snug text-neutral-700">
-                    {CROSS_CASE_SUMMARY}
-                  </p>
-                  <div className="mt-4 overflow-hidden rounded-lg border border-neutral-200">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-neutral-200 bg-neutral-50">
-                          <th className="px-3 py-2 text-left font-medium text-neutral-600">
-                            Case ID
-                          </th>
-                          <th className="px-3 py-2 text-left font-medium text-neutral-600">
-                            Entity
-                          </th>
-                          <th className="px-3 py-2 text-right font-medium text-neutral-600">
-                            Similarity %
-                          </th>
-                          <th className="px-3 py-2 text-left font-medium text-neutral-600">
-                            Outcome
-                          </th>
-                          <th className="px-3 py-2 text-right font-medium text-neutral-600">
-                            Age
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {RELATED_CASES.map((row, i) => (
-                          <tr
-                            key={i}
-                            className="border-b border-neutral-100 last:border-0"
-                          >
-                            <td className="px-3 py-2 font-mono text-neutral-800">
-                              {row.caseId}
-                            </td>
-                            <td className="px-3 py-2 text-neutral-700">
-                              {row.entity}
-                            </td>
-                            <td className="px-3 py-2 text-right tabular-nums text-neutral-700">
-                              {row.similarityScore}%
-                            </td>
-                            <td className="px-3 py-2">
-                              <RelatedCaseOutcomeBadge outcome={row.outcome} />
-                            </td>
-                            <td className="px-3 py-2 text-right text-neutral-600">
-                              {row.daysAgo}d
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="mt-4">
-                    <div className="mb-1.5 flex justify-between text-xs text-neutral-500">
-                      <span>Pattern Recurrence Strength</span>
-                      <span>
-                        {Math.round(
-                          RELATED_CASES.reduce((s, c) => s + c.similarityScore, 0) /
-                            RELATED_CASES.length
-                        )}
-                        %
-                      </span>
-                    </div>
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-100">
-                      <div
-                        className="h-full rounded-full bg-neutral-600 transition-all duration-300"
-                        style={{
-                          width: `${Math.round(
-                            RELATED_CASES.reduce((s, c) => s + c.similarityScore, 0) /
-                              RELATED_CASES.length
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50/80 px-4 py-3">
-                    <p className="text-sm leading-snug text-neutral-700">
-                      {CROSS_CASE_INSIGHT}
-                    </p>
-                  </div>
-                </section>
                 </>
               )}
 
@@ -2562,329 +2483,6 @@ export default function Home() {
                 </div>
               )}
 
-              {activeTab === "Other" && (
-                <>
-                {/* 7. Intelligent SAR Builder */}
-                <section className="rounded-xl border border-neutral-200 bg-white shadow-sm">
-                  <div className="border-b border-neutral-200 px-5 py-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                        Intelligent SAR Builder
-                      </h3>
-                      <span className="rounded border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-xs text-neutral-500">
-                        v1 · Last saved 2h ago
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="p-5 space-y-6">
-                    {/* Auto-Aggregated Metrics */}
-                    <div>
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-3">
-                        Auto-aggregated metrics
-                      </h4>
-                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-xs text-neutral-500">Total suspicious amount</p>
-                          <p className="mt-0.5 font-semibold tabular-nums text-neutral-900">{SAR_METRICS.totalSuspiciousAmount}</p>
-                        </div>
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-xs text-neutral-500">Transaction count</p>
-                          <p className="mt-0.5 font-semibold tabular-nums text-neutral-900">{SAR_METRICS.transactionCount}</p>
-                        </div>
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-xs text-neutral-500">Velocity vs baseline</p>
-                          <p className="mt-0.5 text-sm font-medium text-neutral-800">{SAR_METRICS.velocityVsBaseline}</p>
-                        </div>
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3 sm:col-span-2">
-                          <p className="text-xs text-neutral-500">Top counterparties</p>
-                          <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.topCounterparties.join("; ")}</p>
-                        </div>
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3">
-                          <p className="text-xs text-neutral-500">Jurisdiction breakdown</p>
-                          <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.jurisdictionBreakdown}</p>
-                        </div>
-                        <div className="rounded-lg border border-neutral-100 bg-neutral-50/80 p-3 sm:col-span-3">
-                          <p className="text-xs text-neutral-500">Transaction clustering summary</p>
-                          <p className="mt-0.5 text-sm text-neutral-800">{SAR_METRICS.clusteringSummary}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Subject Occupation & BO Status — above SAR Narrative Draft */}
-                    <div className="mt-4 space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-neutral-700">Subject Occupation (if individual)</label>
-                        <input
-                          type="text"
-                          value={occupation}
-                          onChange={(e) => setOccupation(e.target.value)}
-                          placeholder="e.g., Software Engineer, Retired"
-                          disabled={sarFinalized}
-                          className="mt-1 block w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400 disabled:bg-neutral-50 disabled:text-neutral-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-neutral-700">Beneficial Ownership Status</label>
-                        <select
-                          value={boStatus}
-                          onChange={(e) => setBoStatus(e.target.value)}
-                          disabled={sarFinalized}
-                          className="mt-1 block w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400 disabled:bg-neutral-50 disabled:text-neutral-500"
-                        >
-                          <option value="Verified">Verified</option>
-                          <option value="Pending">Pending</option>
-                          <option value="Not Applicable">Not Applicable</option>
-                          <option value="N/A (Entity)">N/A (Entity)</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* SAR Narrative Draft — single editable field, filing-ready */}
-                    <div className={sarFinalized ? "opacity-90" : ""}>
-                      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                        <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500">
-                          SAR Narrative Draft
-                        </h4>
-                        {sarFinalized && (
-                          <span className="rounded border border-neutral-300 bg-neutral-100 px-1.5 py-0.5 text-xs font-medium text-neutral-600">
-                            Locked
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-neutral-500 mb-3">
-                        {sarFinalized
-                          ? "Immutable. Snapshot captured at filing. This draft is included in the SAR filing package."
-                          : "Investigator-authored narrative. Add, edit, or expand. Real-time compliance checks below."}
-                      </p>
-                      <textarea
-                        value={sarNarrativeDraft}
-                        onChange={(e) => setSarNarrativeDraft(e.target.value)}
-                        readOnly={sarFinalized}
-                        rows={14}
-                        className="w-full rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm leading-relaxed text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none focus:ring-1 focus:ring-neutral-400 disabled:bg-neutral-50 disabled:text-neutral-600"
-                        placeholder="Narrative will be auto-generated from structured content. Edit freely."
-                      />
-                      {/* Real-time compliance guardrails */}
-                      <div className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                        <h5 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
-                          Compliance guardrails
-                        </h5>
-                        {(() => {
-                          const guard = checkComplianceGuardrails(sarNarrativeDraft, occupation);
-                          const hasIssues = guard.accusatory.length > 0 || guard.speculative.length > 0 || guard.missing.length > 0;
-                          if (!hasIssues && sarNarrativeDraft.length > 0)
-                            return <p className="text-xs text-neutral-600">No accusatory or speculative phrasing detected. Regulator-safe tone maintained.</p>;
-                          return (
-                            <ul className="space-y-1 text-xs">
-                              {guard.accusatory.map((msg, i) => (
-                                <li key={i} className="text-red-700">• {msg}</li>
-                              ))}
-                              {guard.speculative.map((msg, i) => (
-                                <li key={i} className="text-amber-700">• {msg}</li>
-                              ))}
-                              {guard.missing.map((msg, i) => (
-                                <li key={i} className="text-amber-700">• Missing: {msg}</li>
-                              ))}
-                            </ul>
-                          );
-                        })()}
-                      </div>
-                      {/* Toggle: View AI-Generated Narrative Structure */}
-                      <div className="mt-4">
-                        <button
-                          type="button"
-                          onClick={() => setViewNarrativeStructure((v) => !v)}
-                          className="text-xs font-medium text-neutral-500 hover:text-neutral-700"
-                        >
-                          {viewNarrativeStructure ? "▼ Hide" : "▶ View"} AI-generated narrative structure
-                        </button>
-                        {viewNarrativeStructure && (
-                          <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                            <p className="text-xs text-neutral-500 mb-3">Structured breakdown for audit traceability. Values shown are resolved from tokens.</p>
-                            <div className="space-y-3">
-                              {SAR_NARRATIVE_SECTIONS.map((section, i) => {
-                                const resolved = section.content.replace(/\[(\w+)\]/g, (_, key) => SAR_TOKEN_VALUES[key] ?? `[${key}]`);
-                                return (
-                                  <div key={i} className="rounded border border-neutral-100 bg-white p-3">
-                                    <p className="text-xs font-medium uppercase tracking-wider text-neutral-500">{section.title}</p>
-                                    <p className="mt-1.5 text-sm leading-snug text-neutral-700">{resolved}</p>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* QA / Completeness Panel */}
-                    {(() => {
-                      const occupationFilled = occupation.trim() !== "";
-                      const boSet = ["Verified", "Pending", "Not Applicable", "N/A (Entity)"].includes(boStatus);
-                      const bothFilled = occupationFilled && boSet;
-                      const completenessScore = bothFilled ? 100 : SAR_QA.narrativeCompletenessScore;
-                      const missingFiltered = SAR_QA.missingElements.filter((el) => !(el.toLowerCase().includes("occupation") && occupationFilled));
-                      return (
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-3">
-                        QA / Completeness
-                      </h4>
-                      <div className="flex flex-wrap items-center gap-4">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-neutral-900">Completeness</span>
-                          <span className="rounded bg-neutral-200 px-2 py-0.5 text-xs font-semibold tabular-nums text-neutral-800">
-                            {completenessScore}%
-                          </span>
-                        </div>
-                        <div className="h-2 w-24 overflow-hidden rounded-full bg-neutral-200">
-                          <div
-                            className="h-full rounded-full bg-emerald-500"
-                            style={{ width: `${completenessScore}%` }}
-                          />
-                        </div>
-                      </div>
-                      {missingFiltered.length > 0 && (
-                        <p className="mt-2 text-xs text-amber-700">
-                          Missing: {missingFiltered.join("; ")}
-                        </p>
-                      )}
-                      {SAR_QA.weakJustification === 0 && SAR_QA.speculativeLanguageFlags === 0 && (
-                        <p className="mt-1 text-xs text-neutral-600">No weak justification or speculative language detected.</p>
-                      )}
-                    </div>
-                      );
-                    })()}
-
-                    {/* Final Action & Case Disposition */}
-                    <div className="rounded-lg border-2 border-neutral-300 bg-neutral-50/80 p-5">
-                      <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-600 mb-4">
-                        Final action & case disposition
-                      </h4>
-                      <p className="text-xs text-neutral-500 mb-4">
-                        Converts draft into auditable compliance action. All actions are logged.
-                      </p>
-                      <div className="flex flex-wrap gap-3">
-                        <button
-                          type="button"
-                          onClick={() => setFileSarModalOpen(true)}
-                          disabled={sarFinalized || caseStatus === "Filed"}
-                          className="rounded-lg bg-neutral-900 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {sarFinalized || caseStatus === "Filed" ? "SAR filed" : "File SAR"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setReturnForDocModalOpen(true)}
-                          disabled={sarFinalized || caseStatus === "Filed"}
-                          className="rounded-lg border-2 border-neutral-300 bg-white px-4 py-2.5 text-sm font-semibold text-neutral-800 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          Return for additional documentation
-                          {returnForDocCount > 0 && (
-                            <span className="ml-1.5 rounded bg-neutral-200 px-1.5 py-0.5 text-xs tabular-nums">
-                              {returnForDocCount}
-                            </span>
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setCloseInsufficientModalOpen(true)}
-                          disabled={sarFinalized || caseStatus === "Filed"}
-                          className="rounded-lg border border-neutral-200 bg-white px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          Close – Insufficient suspicion
-                        </button>
-                      </div>
-                      {sarFinalized && (
-                        <p className="mt-3 text-xs text-neutral-600">
-                          Narrative locked. SAR V{sarVersion} snapshot captured (confidence {analysis?.confidence_score}%, risk {analysis?.risk_recommendation}). Filing package: final narrative, transaction table, evidence appendix, version history.
-                        </p>
-                      )}
-
-                      {/* Decision Audit Log */}
-                      <div className="mt-5 border-t border-neutral-200 pt-4">
-                        <h5 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
-                          Decision audit log
-                        </h5>
-                        <ul className="space-y-2">
-                          {decisionAuditLog.map((entry, i) => (
-                            <li key={i} className="flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-neutral-700">
-                              <span className="font-medium tabular-nums text-neutral-500">
-                                {entry.timestamp || "—"}
-                              </span>
-                              <span className="font-medium text-neutral-800">{entry.user}</span>
-                              <span>{entry.action}</span>
-                              {entry.delta != null && entry.delta !== "" && (
-                                <span className="text-neutral-500">· {entry.delta}</span>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-
-                    {/* Regulatory-Safe Language */}
-                    <p className="text-xs text-neutral-500">
-                      Regulatory-safe language: accusatory phrasing replaced with compliant wording (e.g. “may warrant investigation,” “no determination of guilt”).
-                    </p>
-
-                    {/* One-Click Export */}
-                    <div>
-                      <h4 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-2">
-                        Export
-                      </h4>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={handleExportSarNarrative}
-                          className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                        >
-                          SAR narrative
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleExportTransactionAttachment}
-                          className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                        >
-                          Structured transaction attachment
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleExportTimeline}
-                          className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                        >
-                          Timeline visualization
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleExportEvidenceAppendix}
-                          className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                        >
-                          Evidence appendix
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Expandable technical detail drawer */}
-                    <div className="border-t border-neutral-200 pt-4">
-                      <button
-                        type="button"
-                        onClick={() => setSarTechnicalDrawerOpen((v) => !v)}
-                        className="text-xs font-medium text-neutral-500 hover:text-neutral-700"
-                      >
-                        {sarTechnicalDrawerOpen ? "▼ Hide" : "▶ Show"} technical detail & token list
-                      </button>
-                      {sarTechnicalDrawerOpen && (
-                        <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 font-mono text-xs text-neutral-600">
-                          <p className="font-sans text-xs font-medium text-neutral-500 mb-2">Injected tokens</p>
-                          <p>ENTITY_NAME, ENTITY_ID, ACCOUNT_OPEN_DATE, DATE_RANGE, TX_COUNT, TOTAL_AMOUNT, PCT_VS_BASELINE</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </section>
-                </>
-              )}
             </div>
           </div>
         ) : (
@@ -3344,6 +2942,87 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Import Alerts drawer */}
+      {importDrawerOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/30"
+            aria-hidden
+            onClick={() => setImportDrawerOpen(false)}
+          />
+          <div
+            className="fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col border-l border-neutral-200 bg-white shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="import-alerts-drawer-title"
+          >
+            <div className="flex items-center justify-between border-b border-neutral-100 px-6 py-4">
+              <h2 id="import-alerts-drawer-title" className="text-lg font-semibold text-neutral-900">
+                Import Alerts
+              </h2>
+              <button
+                type="button"
+                onClick={() => setImportDrawerOpen(false)}
+                className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-6 py-5">
+              <p className="text-sm text-neutral-600">
+                Download the template CSV with all columns used for alerts in this product, then choose a CSV file to import.
+              </p>
+              <div>
+                <button
+                  type="button"
+                  onClick={downloadCsvTemplate}
+                  className="rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                >
+                  Download template CSV
+                </button>
+                <p className="mt-1.5 text-xs text-neutral-500">
+                  Template includes all required alert columns and one example row.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700">Choose CSV</label>
+                <input
+                  ref={csvFileInputRef}
+                  type="file"
+                  accept=".csv,text/csv,text/plain"
+                  onChange={handleCsvFileChange}
+                  className="sr-only"
+                  aria-describedby="csv-file-name"
+                />
+                <button
+                  type="button"
+                  onClick={() => csvFileInputRef.current?.click()}
+                  className="mt-1.5 rounded-lg border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                >
+                  Choose CSV file
+                </button>
+                {csvFile && (
+                  <p id="csv-file-name" className="mt-1.5 text-sm text-neutral-600">
+                    Selected: {csvFile.name}
+                  </p>
+                )}
+              </div>
+              <div className="mt-auto pt-2">
+                <button
+                  type="button"
+                  onClick={handleImportClick}
+                  disabled={!csvFile || csvUploading}
+                  className="w-full rounded-lg bg-neutral-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {csvUploading ? "Importing…" : "Import"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
