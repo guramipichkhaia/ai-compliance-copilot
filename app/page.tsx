@@ -625,6 +625,159 @@ function formatCaseValue(value: unknown, field: CaseFieldDef): string {
   }
 }
 
+/** Escape a value for CSV (quote and escape internal quotes). */
+function escapeCsvCell(value: unknown): string {
+  const s = value === undefined || value === null ? "" : String(value);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** Column keys for raw_alert (upload schema) — export includes these when present. */
+const RAW_ALERT_CSV_KEYS: (keyof ProcessedAlert["raw_alert"])[] = [
+  "alert_id",
+  "customer_id",
+  "customer_name",
+  "transaction_type",
+  "transaction_date",
+  "transaction_amount",
+  "transaction_country",
+  "beneficiary_name",
+  "beneficiary_country",
+  "inbound_amount_7d",
+  "outbound_7d_total",
+  "outbound_7d_historical_avg",
+  "outbound_90d_avg",
+  "prior_6m_max_transaction",
+  "risk_rating_onboarding",
+  "risk_rating_current",
+  "prior_sar_count",
+  "alerts_last_90d",
+  "first_time_beneficiary",
+  "first_time_country",
+  "documentation_gap",
+  "adverse_media_flag",
+  "jurisdiction_risk_tier",
+  "alert_title",
+  "alert_description",
+  "case_id",
+  "assigned_analyst",
+  "case_created_date",
+  "sla_countdown",
+  "subject_type",
+  "subject_business_occupation",
+  "subject_account_age_months",
+  "subject_normal_activity",
+  "recipient_account_id",
+  "recipient_account_bank",
+  "date_of_inbound",
+  "date_of_outbound",
+  "time_gap_hours",
+  "total_90d_exposure_beneficiary",
+  "total_90d_exposure_country",
+  "pct_outbound_volume_jurisdiction_90d",
+  "prior_documented_trade_wires_count",
+  "prior_trade_wires_total",
+  "average_documented_trade_wire_amount",
+  "payment_reference_text",
+  "prior_sar_filings",
+];
+
+/** Build CSV string for alerts with all columns and trigger results. */
+function buildAlertsCsv(
+  alerts: DisplayAlert[],
+  policyConfig: PolicyConfig,
+  alertStatuses: Record<string, string>,
+  getPolicyTriggers: (amount: number | undefined) => PolicyTrigger[]
+): string {
+  const triggerCols = policyConfig.triggers.map((tc) => `Trigger: ${tc.name}`);
+  const rawAlertCols = RAW_ALERT_CSV_KEYS as string[];
+  const headers = [
+    "id",
+    "title",
+    "entityName",
+    "entityId",
+    "type",
+    "date",
+    "amount",
+    "counterpartyCountry",
+    "description",
+    "riskLevel",
+    "status",
+    "triggers_met_count",
+    "triggers_total",
+    "escalation_recommended",
+    "evaluation_timestamp",
+    "policy_version",
+    ...rawAlertCols,
+    ...triggerCols,
+  ];
+  const rows: string[][] = [headers.map(escapeCsvCell)];
+
+  for (const alert of alerts) {
+    const status = alertStatuses[alert.id] ?? "Open";
+    let triggersMetCount: number;
+    let triggersTotal: number;
+    let escalationRecommended: boolean;
+    const triggerResultsById: Record<string, "Met" | "Not Met"> = {};
+
+    if (isImportedAlert(alert) && alert.triggers?.length) {
+      triggersTotal = alert.triggers.length;
+      triggersMetCount = alert.triggers_met_count ?? alert.triggers.filter((t) => t.result === "Met").length;
+      escalationRecommended = alert.escalation_recommended ?? false;
+      for (const t of alert.triggers) {
+        triggerResultsById[t.triggerId] = t.result;
+      }
+    } else {
+      const triggers = getPolicyTriggers(parseAmount(alert.amount));
+      triggersTotal = triggers.length;
+      triggersMetCount = triggers.filter((t) => t.met).length;
+      escalationRecommended =
+        triggersMetCount >= policyConfig.minRegularTriggersToEscalate ||
+        triggers.some((t) => t.isCritical && t.met);
+      for (const t of triggers) {
+        triggerResultsById[t.id] = t.resultLabel;
+      }
+    }
+
+    const evaluationTimestamp = alert.evaluation_timestamp ?? "";
+    const policyVersion = alert.policy_version ?? "";
+
+    const rawAlert = isImportedAlert(alert) ? alert.raw_alert : undefined;
+    const rawValues = RAW_ALERT_CSV_KEYS.map((key) => {
+      if (!rawAlert || !(key in rawAlert)) return "";
+      const v = rawAlert[key as keyof typeof rawAlert];
+      if (v === undefined || v === null) return "";
+      if (typeof v === "boolean") return v ? "true" : "false";
+      return String(v);
+    });
+
+    const triggerValues = policyConfig.triggers.map((tc) => triggerResultsById[tc.id] ?? "Not Met");
+    const row = [
+      alert.id,
+      alert.title,
+      alert.entityName,
+      alert.entityId,
+      alert.type,
+      alert.date,
+      alert.amount,
+      alert.counterpartyCountry,
+      alert.description,
+      alert.riskLevel,
+      status,
+      String(triggersMetCount),
+      String(triggersTotal),
+      escalationRecommended ? "Yes" : "No",
+      evaluationTimestamp,
+      policyVersion,
+      ...rawValues,
+      ...triggerValues,
+    ];
+    rows.push(row.map(escapeCsvCell));
+  }
+
+  return rows.map((r) => r.join(",")).join("\r\n");
+}
+
 /** Policy Escalation Mapping — all triggers (predefined + custom) evaluated via caseData and rule engine. */
 type PolicyTrigger = {
   id: string;
@@ -1738,6 +1891,27 @@ export default function Home() {
           <button
             type="button"
             onClick={() => {
+              const csv = buildAlertsCsv(
+                alertList,
+                policyConfig,
+                alertStatuses,
+                (amount) => getPolicyEscalationTriggers(SOURCE_OF_FUNDS.timeGapHours, amount, policyConfig)
+              );
+              const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `alerts-export-${new Date().toISOString().slice(0, 10)}.csv`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+          >
+            Export Alerts
+          </button>
+          <button
+            type="button"
+            onClick={() => {
               setImportDrawerOpen(true);
               setCsvFile(null);
             }}
@@ -1932,8 +2106,10 @@ export default function Home() {
                     setSelectedAlertId(alert.id);
                     setAnalysis(cardAnalysis ?? null);
                   }}
-                  className={`relative mb-2 w-full rounded-lg border border-neutral-200 bg-white px-4 py-3 text-left transition-all duration-200 hover:border-neutral-300 hover:bg-neutral-50 ${
-                    isSelected ? "border-blue-200 bg-blue-50/80 shadow-sm" : ""
+                  className={`relative mb-2 w-full rounded-lg border px-4 py-3 text-left transition-all duration-200 ${
+                    isSelected
+                      ? "border-blue-300 bg-blue-100/80"
+                      : "border-neutral-200 bg-white hover:border-neutral-300 hover:bg-neutral-50"
                   }`}
                 >
                   {aiAssessmentBadge}
@@ -2251,7 +2427,7 @@ export default function Home() {
                       <ul className="text-sm text-neutral-800 space-y-1.5 list-none">
                         <li><span className="text-neutral-500">Name:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.beneficiary_name != null && selectedAlert.raw_alert.beneficiary_name !== "" ? selectedAlert.raw_alert.beneficiary_name : "Mediterranean Trade Partners"}</li>
                         <li><span className="text-neutral-500">Account:</span> {isImportedAlert(selectedAlert) && (selectedAlert.raw_alert?.recipient_account_id != null || selectedAlert.raw_alert?.recipient_account_bank != null) ? `${selectedAlert.raw_alert.recipient_account_id ?? ""}${selectedAlert.raw_alert.recipient_account_bank ? ` (${selectedAlert.raw_alert.recipient_account_bank})` : ""}`.trim() || "—" : "CY9876543210 (Bank of Cyprus)"}</li>
-                        <li><span className="text-neutral-500">Country:</span> {selectedAlert.counterpartyCountry}{selectedAlert.counterpartyCountry ? " (FATF High-Risk)" : ""}</li>
+                        <li><span className="text-neutral-500">Country:</span> {selectedAlert.counterpartyCountry ?? "—"}</li>
                         <li><span className="text-neutral-500">Relationship:</span> {isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.first_time_beneficiary === true ? "No prior transactions (first-time beneficiary)" : isImportedAlert(selectedAlert) && selectedAlert.raw_alert?.first_time_beneficiary === false ? "Prior transaction history exists" : "No prior transactions (first-time beneficiary)"}</li>
                       </ul>
                     </div>
@@ -2304,7 +2480,6 @@ export default function Home() {
                     ? getCaseDataFromUploadedAlert(selectedAlert.raw_alert)
                     : buildCaseDataForEvaluation(selectedAlert ? parseAmount(selectedAlert.amount) : undefined);
                   const triggerFieldKeyToRegistryKey: Record<string, string> = {
-                    rapidMovementHours: "timeGapHours",
                     velocity7dMultiple: "spikeMultiple7d",
                     documentationGap: "documentationGapPresent",
                     corridorNovelty: "firstTimeCountry",

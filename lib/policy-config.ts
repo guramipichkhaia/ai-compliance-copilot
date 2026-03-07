@@ -93,12 +93,15 @@ function migrateTrigger(legacy: unknown): UnifiedTriggerConfig | null {
   const id = String(o?.id ?? "");
   const predefined = PREDEFINED_DEFAULTS[id];
   if (predefined) {
+    const isBooleanTrigger = predefined.operator === "boolean_true";
+    const operator = isBooleanTrigger ? "boolean_true" : ((o.operator as string) ?? (o.comparisonOperator as string) ?? predefined.operator);
+    const threshold = isBooleanTrigger ? true : (typeof o.threshold !== "undefined" ? (o.threshold as number | string | boolean) : (typeof o.thresholdValue !== "undefined" ? (o.thresholdValue as number) : predefined.threshold));
     return {
       id,
       name: predefined.name,
       fieldKey: predefined.fieldKey,
-      operator: (o.operator as string) ?? (o.comparisonOperator as string) ?? predefined.operator,
-      threshold: typeof o.threshold !== "undefined" ? (o.threshold as number | string | boolean) : (typeof o.thresholdValue !== "undefined" ? (o.thresholdValue as number) : predefined.threshold),
+      operator,
+      threshold,
       critical: Boolean(typeof o.critical !== "undefined" ? o.critical : o.isCritical ?? predefined.critical),
       enabled: Boolean(o.enabled !== false),
       type: "predefined",

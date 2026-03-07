@@ -35,7 +35,7 @@ export const caseFieldRegistry: Record<string, { title: string; fields: CaseFiel
       { key: "largestInbound7d", label: "Largest inbound within 7 days prior to wire", type: "currency" },
       { key: "dateOfInbound", label: "Date of inbound", type: "text" },
       { key: "dateOfOutbound", label: "Date of outbound", type: "text" },
-      { key: "timeGapHours", label: "Time gap between inbound and outbound (hours)", type: "hours", unit: "h" },
+      { key: "rapidMovementHours", label: "Rapid movement (hours)", type: "hours", unit: "h" },
     ],
   },
   corridorBeneficiary: {
@@ -57,6 +57,7 @@ export const caseFieldRegistry: Record<string, { title: string; fields: CaseFiel
   statedPurpose: {
     title: "Stated Purpose & Documentation Review",
     fields: [
+      { key: "documentationGap", label: "Documentation gap", type: "boolean" },
       { key: "documentationGapPresent", label: "Documentation gap present", type: "boolean" },
       { key: "priorDocumentedTradeWiresCount", label: "Prior documented trade wires (count)", type: "number" },
       { key: "priorTradeWiresTotal", label: "Prior trade wires total", type: "number" },
@@ -78,6 +79,7 @@ export const caseFieldRegistry: Record<string, { title: string; fields: CaseFiel
   adverseMedia: {
     title: "Adverse Media / Reputation",
     fields: [
+      { key: "negativeMediaRisk", label: "Negative Media Risk", type: "boolean" },
       { key: "adverseMediaIndicator", label: "Adverse media indicator", type: "boolean" },
     ],
   },

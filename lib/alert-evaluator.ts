@@ -87,6 +87,9 @@ export function getCaseDataFromUploadedAlert(alert: UploadedAlert): Record<strin
   if (typeof alert.total_90d_exposure_country === "number" && !Number.isNaN(alert.total_90d_exposure_country)) {
     out.total90dExposureCountry = alert.total_90d_exposure_country;
   }
+  if (typeof concentrationPercent === "number" && !Number.isNaN(concentrationPercent)) {
+    out.pctOutboundVolumeJurisdiction90d = concentrationPercent;
+  }
   if (typeof alert.prior_documented_trade_wires_count === "number" && !Number.isNaN(alert.prior_documented_trade_wires_count)) {
     out.priorDocumentedTradeWiresCount = alert.prior_documented_trade_wires_count;
   }
